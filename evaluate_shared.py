@@ -6,15 +6,13 @@ from tqdm import tqdm
 import copy
 
 from arc_compressor import ARCCompressor
-# 修正：导入正确的函数名和 pad_grid
-from preprocessing import preprocess_tasks, pad_grid
-from train import train_model
+# 修正：从新的 lib.py 导入可重用函数
+from lib import preprocess_task_for_sharing, training_loop
 import config
 
 def evaluate_with_shared_weights(tasks_file_path, output_dir="evaluation_outputs", fine_tune_steps=100):
     """
-    Loads the shared weights model, fine-tunes it on each task's training examples,
-    and then evaluates it on the test examples.
+    Loads shared weights, fine-tunes on each task's train pairs, and evaluates.
     """
     print(f"Using device: {config.DEVICE}")
     print(f"Test-time fine-tuning steps per task: {fine_tune_steps}")
@@ -51,21 +49,20 @@ def evaluate_with_shared_weights(tasks_file_path, output_dir="evaluation_outputs
     task_ids = list(evaluation_tasks.keys())
     print(f"Found {len(task_ids)} tasks for evaluation. Starting fine-tuning and prediction...")
 
-    for task_id in tqdm(task_ids, desc="Evaluating tasks"):
+    for task_id in tqdm(task_ids, desc="Evaluating All Tasks"):
         task_data = evaluation_tasks[task_id]
         task_output_dir = os.path.join(output_dir, task_id)
         os.makedirs(task_output_dir, exist_ok=True)
 
         task_model = copy.deepcopy(base_model)
         
-        # 修正：使用正确的函数名 preprocess_tasks 并传入所需参数
-        train_in_grids, train_out_grids, test_in_grids, _ = preprocess_tasks(task_data, config.MAX_H, config.MAX_W)
+        # 修正：使用 lib.py 中的预处理函数
+        train_in_grids, train_out_grids, test_in_grids, _ = preprocess_task_for_sharing(task_data, config.MAX_H, config.MAX_W)
 
         if fine_tune_steps > 0 and train_in_grids:
-            task_model.train()
             optimizer = optim.Adam(task_model.parameters(), lr=config.LEARNING_RATE / 10)
-
-            train_model(
+            # 修正：使用 lib.py 中的训练循环函数进行微调
+            training_loop(
                 model=task_model,
                 optimizer=optimizer,
                 train_in=train_in_grids,
@@ -79,7 +76,6 @@ def evaluate_with_shared_weights(tasks_file_path, output_dir="evaluation_outputs
 
         task_model.eval()
         
-        # 使用从 preprocess_tasks 返回的已经填充好的测试输入
         for i, test_input_grid in enumerate(test_in_grids):
             input_tensor = torch.tensor([test_input_grid], dtype=torch.long, device=config.DEVICE)
 

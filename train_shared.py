@@ -6,9 +6,8 @@ from tqdm import tqdm
 import random
 
 from arc_compressor import ARCCompressor
-# 修正：导入正确的函数名
-from preprocessing import preprocess_tasks
-from train import train_model
+# 修正：从新的 lib.py 导入可重用函数
+from lib import preprocess_task_for_sharing, training_loop
 import config
 
 # 导入评估函数
@@ -47,18 +46,20 @@ def train_shared_weights():
 
     print(f"Found {len(task_ids)} training tasks. Starting training...")
 
-    for task_id in tqdm(task_ids, desc="Training on all tasks"):
+    # 主训练循环
+    for task_id in tqdm(task_ids, desc="Overall Training Progress"):
         task_data = training_tasks[task_id]
         
         try:
-            # 修正：使用正确的函数名 preprocess_tasks 并传入所需参数
-            input_grids, output_grids, _, _ = preprocess_tasks(task_data, config.MAX_H, config.MAX_W)
+            # 修正：使用 lib.py 中的预处理函数
+            input_grids, output_grids, _, _ = preprocess_task_for_sharing(task_data, config.MAX_H, config.MAX_W)
             
             if not input_grids:
-                tqdm.write(f"Skipping task {task_id}: No valid training pairs found after preprocessing.")
+                tqdm.write(f"Skipping task {task_id}: No valid training pairs found.")
                 continue
 
-            train_model(
+            # 修正：使用 lib.py 中的训练循环函数
+            training_loop(
                 model=model,
                 optimizer=optimizer,
                 train_in=input_grids,
@@ -67,7 +68,7 @@ def train_shared_weights():
                 batch_size=config.BATCH_SIZE,
                 device=config.DEVICE,
                 task_id=task_id,
-                disable_tqdm=True # Disable inner loop tqdm to keep output clean
+                disable_tqdm=True # 禁用内部循环的tqdm，保持主进度条清晰
             )
 
         except Exception as e:
@@ -97,5 +98,9 @@ if __name__ == '__main__':
          print(f"'{eval_file}' not found. Evaluating on training set as a demonstration.")
          eval_file = os.path.join(config.ARC_PATH, 'arc-agi_training_challenges.json')
 
-    evaluate_with_shared_weights(eval_file, fine_tune_steps=TEST_TIME_STEPS)
+    if os.path.exists(eval_file):
+        evaluate_with_shared_weights(eval_file, fine_tune_steps=TEST_TIME_STEPS)
+    else:
+        print(f"Evaluation file not found at {eval_file}. Skipping evaluation.")
+        
     print("--- Evaluation Finished ---")
