@@ -1,5 +1,4 @@
 import numpy as np
-import torch
 from typing import Dict, Any, List, Tuple, DefaultDict
 from collections import defaultdict
 
@@ -79,7 +78,7 @@ def count_non_background_pixels(task_data: Dict[str, Any], pixel_threshold_pct: 
     return count
 
 def compute_task_complexity(task_data, bg_threshold=40):
-    """Compute task complexity based on non-background pixels and grid dimensions"""
+    """Compute task complexity based on non-background pixels, colors, and grid size"""
     # Count non-background pixels
     non_bg_count = count_non_background_pixels(task_data, bg_threshold)
     
