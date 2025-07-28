@@ -44,7 +44,7 @@ class ARCDataset(Dataset):
         # Convert to tensor
         return torch.tensor(padded_one_hot, dtype=torch.float), torch.tensor(padded_grid, dtype=torch.long)
 
-# Loss function for discrete VAE - FIXED VERSION
+# Loss function for discrete VAE - PROPERLY FIXED VERSION
 def vae_loss(reconstruction, x, mu, logvar, beta=1.0):
     """
     reconstruction: [batch_size, grid_cells, num_categories] (e.g., [32, 900, 10])
@@ -52,15 +52,27 @@ def vae_loss(reconstruction, x, mu, logvar, beta=1.0):
     """
     batch_size = x.size(0)
     
-    # Reshape reconstruction to [batch_size, num_categories, grid_cells]
-    # This puts class dimension second as expected by cross_entropy
-    recon_flat = reconstruction.view(batch_size, -1, 10).permute(0, 2, 1)
-    
     # Flatten target to [batch_size, grid_cells]
-    x_flat = x.view(batch_size, -1)
+    x_flat = x.reshape(batch_size, -1)
     
-    # Now dimensions match what cross_entropy expects
-    recon_loss = F.cross_entropy(recon_flat, x_flat)
+    # Reshape reconstruction for cross_entropy
+    # cross_entropy expects logits in shape [N, C, H, W] and targets in shape [N, H, W]
+    # here N=batch_size, C=num_categories, and H*W=grid_cells
+    recon_flat = reconstruction.reshape(batch_size, 900, 10)
+    
+    # Compute cross entropy loss manually for each position
+    # This avoids dimension mismatches
+    loss = 0
+    for i in range(900):  # For each grid cell
+        # Extract logits for this position [batch_size, 10]
+        pos_logits = recon_flat[:, i, :]
+        # Extract target for this position [batch_size]
+        pos_target = x_flat[:, i]
+        # Compute CE loss for this position and add to total
+        loss += F.cross_entropy(pos_logits, pos_target)
+    
+    # Average over all positions
+    recon_loss = loss / 900
     
     # KL divergence
     kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
@@ -83,6 +95,9 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
     
     # Initialize optimizer
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    
+    print(f"Training on device: {device}")
+    print(f"Dataset size: {len(dataset)} examples")
     
     # Training loop
     for epoch in range(epochs):
@@ -129,8 +144,10 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Train DiscreteVAE on ARC tasks")
-    parser.add_argument("--data", type=str, default="/home/zdx/github/VSAHDC/ARC-AGI-2/data/training", help="Path to ARC training data")
-    parser.add_argument("--save_dir", type=str, default="checkpoints", help="Directory to save model checkpoints")
+    parser.add_argument("--data", type=str, default="/home/zdx/github/VSAHDC/ARC-AGI-2/data/training", 
+                        help="Path to ARC training data")
+    parser.add_argument("--save_dir", type=str, default="./checkpoints/", 
+                        help="Directory to save model checkpoints")
     parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=32, help="Training batch size")
     parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
