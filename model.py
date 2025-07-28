@@ -3,8 +3,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
+class ResidualBlock(nn.Module):
+    def __init__(self, in_features):
+        super(ResidualBlock, self).__init__()
+        self.block = nn.Sequential(
+            nn.Linear(in_features, in_features),
+            nn.LayerNorm(in_features),
+            nn.ReLU(),
+            nn.Linear(in_features, in_features),
+            nn.LayerNorm(in_features)
+        )
+        self.relu = nn.ReLU()
+        
+    def forward(self, x):
+        return self.relu(x + self.block(x))
+
 class DiscreteVAE(nn.Module):
-    def __init__(self, grid_size=30, num_categories=10, hidden_dim=512, latent_dim=256):
+    def __init__(self, grid_size=30, num_categories=10, hidden_dim=512, latent_dim=256, use_residual=True):
         super(DiscreteVAE, self).__init__()
         
         self.grid_size = grid_size
@@ -12,27 +27,47 @@ class DiscreteVAE(nn.Module):
         self.grid_cells = grid_size * grid_size
         self.input_dim = self.grid_cells * num_categories
         self.latent_dim = latent_dim
+        self.use_residual = use_residual
         
         # Encoder layers
-        self.encoder = nn.Sequential(
-            nn.Linear(self.input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU()
-        )
+        if use_residual:
+            self.encoder = nn.Sequential(
+                nn.Linear(self.input_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(),
+                ResidualBlock(hidden_dim),
+                ResidualBlock(hidden_dim)
+            )
+        else:
+            self.encoder = nn.Sequential(
+                nn.Linear(self.input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU()
+            )
         
         # Latent space parameters
         self.fc_mu = nn.Linear(hidden_dim, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
         
         # Decoder layers
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, self.grid_cells * num_categories)
-        )
+        if use_residual:
+            self.decoder = nn.Sequential(
+                nn.Linear(latent_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(),
+                ResidualBlock(hidden_dim),
+                ResidualBlock(hidden_dim),
+                nn.Linear(hidden_dim, self.grid_cells * num_categories)
+            )
+        else:
+            self.decoder = nn.Sequential(
+                nn.Linear(latent_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, self.grid_cells * num_categories)
+            )
     
     def encode(self, x):
         """
