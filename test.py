@@ -4,10 +4,58 @@ import json
 import os
 import argparse
 import time
+import itertools
 from model import DiscreteVAE
 from discrete_vae import DiscreteVAE as FullDiscreteVAE
 from torch.cuda.amp import autocast
 import torch.nn.functional as F
+import pandas as pd
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+import datetime
+
+def check_gpu(gpu_id=None):
+    """检查并详细报告GPU状态"""
+    if not torch.cuda.is_available():
+        print("警告: 未检测到CUDA，将使用CPU进行推理 (速度会非常慢)")
+        return False, "cpu", None
+    
+    device_count = torch.cuda.device_count()
+    if device_count == 0:
+        print("警告: 虽然CUDA可用，但未找到可用的GPU设备，将使用CPU推理")
+        return False, "cpu", None
+    
+    # 打印所有可用GPU的详细信息
+    print(f"检测到 {device_count} 个GPU:")
+    for i in range(device_count):
+        gpu_name = torch.cuda.get_device_name(i)
+        total_memory = torch.cuda.get_device_properties(i).total_memory / 1024**3  # GB
+        print(f"  GPU {i}: {gpu_name} ({total_memory:.2f} GB)")
+    
+    # 如果指定了GPU ID，优先使用指定的GPU
+    if gpu_id is not None:
+        if gpu_id >= device_count:
+            print(f"警告: 指定的GPU ID {gpu_id} 超出可用GPU数量范围，将使用默认GPU")
+            device_id = 0
+        else:
+            device_id = gpu_id
+            print(f"使用指定的GPU {device_id}")
+    else:
+        # 默认使用第一个GPU
+        device_id = 0
+    
+    device = f"cuda:{device_id}"
+    
+    # 测试内存分配
+    try:
+        test_tensor = torch.zeros((100, 100), device=device)
+        del test_tensor
+        print(f"成功在 {device} 上分配测试张量")
+    except Exception as e:
+        print(f"警告: GPU内存分配测试失败: {e}")
+        print("将尝试继续使用GPU，但可能会遇到问题")
+    
+    return True, device, device_id
 
 def load_model(model_path, device='cuda', use_discrete_vae=True, 
               codebook_size=512, embedding_dim=64, use_residual=True):
@@ -32,6 +80,14 @@ def load_model(model_path, device='cuda', use_discrete_vae=True,
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
+    
+    # 打印GPU内存使用情况
+    if device.startswith("cuda"):
+        gpu_id = int(device.split(":")[-1])
+        allocated_mem = torch.cuda.memory_allocated(gpu_id) / 1024**3  # GB
+        total_mem = torch.cuda.get_device_properties(gpu_id).total_memory / 1024**3  # GB
+        print(f"模型已加载到GPU，内存使用: {allocated_mem:.2f}GB / {total_mem:.2f}GB")
+    
     return model
 
 def preprocess_grid(grid):
@@ -186,7 +242,8 @@ def test_time_train(model, train_examples, epochs=10, lr=0.0005, device='cuda', 
             
             epoch_loss += loss.item()
         
-        print(f"测试时训练 epoch {epoch+1}/{epochs}, 损失: {epoch_loss:.4f}")
+        if epochs > 1:  # 只在多个轮次时打印进度
+            print(f"测试时训练 epoch {epoch+1}/{epochs}, 损失: {epoch_loss:.4f}")
     
     fine_tuned_model.eval()
     return fine_tuned_model
@@ -214,6 +271,9 @@ def evaluate_task(model, task_path, num_inference_steps=5, test_time_epochs=10, 
     correct = 0
     total = len(task['test'])
     
+    # 存储任务级别的像素准确率数据
+    pixel_accuracies = []
+    
     for test_example in task['test']:
         input_grid = np.array(test_example['input'])
         expected_output = np.array(test_example['output'])
@@ -233,19 +293,36 @@ def evaluate_task(model, task_path, num_inference_steps=5, test_time_epochs=10, 
             )
         
         # Post-process output
-        output_grid = postprocess_grid(output_grid, expected_output.shape)
+        predicted_output = postprocess_grid(output_grid, expected_output.shape)
         
         # Check if output matches expected
-        if np.array_equal(output_grid, expected_output):
+        is_correct = np.array_equal(predicted_output, expected_output)
+        if is_correct:
             correct += 1
+        
+        # 计算像素级准确率
+        total_pixels = expected_output.size
+        correct_pixels = np.sum(predicted_output == expected_output)
+        pixel_accuracy = correct_pixels / total_pixels
+        pixel_accuracies.append(pixel_accuracy)
     
-    accuracy = correct / total if total > 0 else 0
-    return accuracy
+    task_accuracy = correct / total if total > 0 else 0
+    avg_pixel_accuracy = np.mean(pixel_accuracies) if pixel_accuracies else 0
+    
+    return task_accuracy, avg_pixel_accuracy
 
 def evaluate_all_tasks(model_path, data_dir, num_inference_steps=5, test_time_epochs=10, 
-                      use_amp=True, use_discrete_vae=True, codebook_size=512, embedding_dim=64):
+                      use_amp=True, use_discrete_vae=True, codebook_size=512, embedding_dim=64,
+                      gpu_id=None):
     """Evaluate model on all tasks in a directory"""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # 检查GPU状态
+    has_gpu, device_str, detected_gpu_id = check_gpu(gpu_id)
+    device = torch.device(device_str)
+    
+    # 只有在GPU上才使用混合精度
+    use_amp = use_amp and has_gpu
+    
+    # 加载模型
     model = load_model(
         model_path, 
         device, 
@@ -256,60 +333,208 @@ def evaluate_all_tasks(model_path, data_dir, num_inference_steps=5, test_time_ep
     
     total_tasks = 0
     total_correct = 0
+    all_pixel_accuracies = []
     task_results = {}
+    
+    # 创建结果目录
+    current_time = datetime.datetime.now()
+    timestamp = current_time.strftime("%Y%m%d_%H%M%S")
+    model_dir = os.path.dirname(model_path)
+    results_dir = os.path.join(model_dir, f"evaluation_{timestamp}")
+    os.makedirs(results_dir, exist_ok=True)
     
     start_time = time.time()
     
-    for filename in os.listdir(data_dir):
-        if filename.endswith('.json'):
-            task_path = os.path.join(data_dir, filename)
-            task_start_time = time.time()
-            
-            accuracy = evaluate_task(
-                model, task_path, 
-                num_inference_steps=num_inference_steps,
-                test_time_epochs=test_time_epochs,
-                device=device,
-                use_amp=use_amp,
-                use_discrete_vae=use_discrete_vae,
-                codebook_size=codebook_size,
-                embedding_dim=embedding_dim
-            )
-            
-            task_time = time.time() - task_start_time
-            task_results[filename] = accuracy
-            
-            print(f"任务 {filename}: 准确率 = {accuracy:.2f} (耗时 {task_time:.2f}s)")
-            
-            total_tasks += 1
-            total_correct += accuracy
+    # 获取所有任务文件
+    task_files = [f for f in os.listdir(data_dir) if f.endswith('.json')]
+    
+    for filename in tqdm(task_files, desc="评估任务"):
+        task_path = os.path.join(data_dir, filename)
+        task_start_time = time.time()
+        
+        task_accuracy, pixel_accuracy = evaluate_task(
+            model, task_path, 
+            num_inference_steps=num_inference_steps,
+            test_time_epochs=test_time_epochs,
+            device=device,
+            use_amp=use_amp,
+            use_discrete_vae=use_discrete_vae,
+            codebook_size=codebook_size,
+            embedding_dim=embedding_dim
+        )
+        
+        task_time = time.time() - task_start_time
+        all_pixel_accuracies.append(pixel_accuracy)
+        
+        task_results[filename] = {
+            "task_accuracy": task_accuracy,
+            "pixel_accuracy": pixel_accuracy,
+            "eval_time": task_time
+        }
+        
+        print(f"任务 {filename}: 准确率={task_accuracy:.2f}, 像素准确率={pixel_accuracy:.4f}, 耗时={task_time:.2f}s")
+        
+        total_tasks += 1
+        total_correct += task_accuracy
     
     overall_accuracy = total_correct / total_tasks if total_tasks > 0 else 0
+    avg_pixel_accuracy = np.mean(all_pixel_accuracies) if all_pixel_accuracies else 0
     total_time = time.time() - start_time
     
-    print(f"\n{total_tasks} 个任务的总体准确率: {overall_accuracy:.4f}")
+    print(f"\n{total_tasks}个任务的总体准确率: {overall_accuracy:.4f}")
+    print(f"平均像素准确率: {avg_pixel_accuracy:.4f}")
     print(f"总评估时间: {total_time:.2f}s, 每任务平均: {total_time/total_tasks:.2f}s")
     
     # 保存结果到文件
     model_type = "discrete" if use_discrete_vae else "standard"
-    results_path = os.path.join(os.path.dirname(model_path), f'{model_type}_evaluation_results.json')
+    results_path = os.path.join(results_dir, f'{model_type}_eval_steps{num_inference_steps}_tt{test_time_epochs}.json')
     with open(results_path, 'w') as f:
         json.dump({
             'model_path': model_path,
             'model_type': model_type,
-            'overall_accuracy': overall_accuracy,
+            'overall_accuracy': float(overall_accuracy),
+            'average_pixel_accuracy': float(avg_pixel_accuracy),
             'total_tasks': total_tasks,
             'inference_steps': num_inference_steps,
             'test_time_epochs': test_time_epochs,
             'codebook_size': codebook_size if use_discrete_vae else None,
             'embedding_dim': embedding_dim if use_discrete_vae else None,
             'task_results': task_results,
-            'evaluation_time': total_time
+            'evaluation_time': total_time,
+            'device': device_str,
+            'timestamp': timestamp
         }, f, indent=2)
     
     print(f"结果已保存到 {results_path}")
     
-    return overall_accuracy
+    return overall_accuracy, avg_pixel_accuracy, task_results
+
+def parameter_scan(model_path, data_dir, use_discrete_vae=True, codebook_size=512, embedding_dim=64, gpu_id=None):
+    """
+    进行参数扫描实验，测试不同的inference_steps和test_time_epochs组合
+    """
+    # 检查GPU状态
+    has_gpu, device_str, detected_gpu_id = check_gpu(gpu_id)
+    
+    # 创建实验结果目录
+    current_time = datetime.datetime.now()
+    timestamp = current_time.strftime("%Y%m%d_%H%M%S")
+    model_dir = os.path.dirname(model_path)
+    scan_dir = os.path.join(model_dir, f"param_scan_{timestamp}")
+    os.makedirs(scan_dir, exist_ok=True)
+    
+    # 定义要尝试的参数
+    steps_options = [1, 3, 5, 10]
+    tt_epochs_options = [0, 5, 10, 20]
+    
+    # 准备结果收集
+    results = []
+    
+    print(f"开始参数扫描: inference_steps {steps_options}, test_time_epochs {tt_epochs_options}")
+    print(f"使用设备: {device_str}")
+    
+    # 遍历所有参数组合
+    for steps, tt_epochs in itertools.product(steps_options, tt_epochs_options):
+        print(f"\n===== 测试参数: steps={steps}, tt_epochs={tt_epochs} =====")
+        
+        # 评估当前参数组合
+        overall_acc, pixel_acc, task_results = evaluate_all_tasks(
+            model_path,
+            data_dir,
+            num_inference_steps=steps,
+            test_time_epochs=tt_epochs,
+            use_amp=has_gpu,  # 只在GPU上使用AMP
+            use_discrete_vae=use_discrete_vae,
+            codebook_size=codebook_size,
+            embedding_dim=embedding_dim,
+            gpu_id=gpu_id
+        )
+        
+        # 记录结果
+        results.append({
+            'inference_steps': steps,
+            'test_time_epochs': tt_epochs,
+            'overall_accuracy': float(overall_acc),
+            'pixel_accuracy': float(pixel_acc),
+            'task_results': task_results
+        })
+        
+        # 保存当前结果
+        with open(os.path.join(scan_dir, f'scan_steps{steps}_tt{tt_epochs}.json'), 'w') as f:
+            json.dump(results[-1], f, indent=2)
+    
+    # 生成结果摘要
+    summary_df = pd.DataFrame([
+        {
+            'inference_steps': r['inference_steps'], 
+            'test_time_epochs': r['test_time_epochs'],
+            'overall_accuracy': r['overall_accuracy'],
+            'pixel_accuracy': r['pixel_accuracy']
+        } 
+        for r in results
+    ])
+    
+    # 保存为CSV
+    summary_df.to_csv(os.path.join(scan_dir, 'param_scan_summary.csv'), index=False)
+    
+    # 绘制热力图
+    plt.figure(figsize=(12, 10))
+    
+    # 准确率热力图
+    plt.subplot(2, 1, 1)
+    heatmap_data = summary_df.pivot(
+        index='test_time_epochs', 
+        columns='inference_steps', 
+        values='overall_accuracy'
+    )
+    plt.imshow(heatmap_data, cmap='viridis', interpolation='nearest')
+    plt.colorbar(label='Overall Accuracy')
+    plt.title('Task Accuracy by Parameter Combination')
+    plt.xlabel('Inference Steps')
+    plt.ylabel('Test-Time Training Epochs')
+    for i in range(len(heatmap_data.index)):
+        for j in range(len(heatmap_data.columns)):
+            plt.text(j, i, f'{heatmap_data.iloc[i, j]:.3f}', 
+                    ha='center', va='center', color='white')
+    plt.xticks(range(len(heatmap_data.columns)), heatmap_data.columns)
+    plt.yticks(range(len(heatmap_data.index)), heatmap_data.index)
+    
+    # 像素准确率热力图
+    plt.subplot(2, 1, 2)
+    heatmap_data = summary_df.pivot(
+        index='test_time_epochs', 
+        columns='inference_steps', 
+        values='pixel_accuracy'
+    )
+    plt.imshow(heatmap_data, cmap='viridis', interpolation='nearest')
+    plt.colorbar(label='Pixel Accuracy')
+    plt.title('Pixel Accuracy by Parameter Combination')
+    plt.xlabel('Inference Steps')
+    plt.ylabel('Test-Time Training Epochs')
+    for i in range(len(heatmap_data.index)):
+        for j in range(len(heatmap_data.columns)):
+            plt.text(j, i, f'{heatmap_data.iloc[i, j]:.3f}', 
+                    ha='center', va='center', color='white')
+    plt.xticks(range(len(heatmap_data.columns)), heatmap_data.columns)
+    plt.yticks(range(len(heatmap_data.index)), heatmap_data.index)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(scan_dir, 'param_scan_heatmap.png'))
+    
+    print(f"参数扫描完成，结果保存在: {scan_dir}")
+    print(summary_df)
+    
+    # 返回最佳参数
+    best_overall_idx = summary_df['overall_accuracy'].argmax()
+    best_pixel_idx = summary_df['pixel_accuracy'].argmax()
+    
+    best_overall = summary_df.iloc[best_overall_idx]
+    best_pixel = summary_df.iloc[best_pixel_idx]
+    
+    print(f"\n最佳任务准确率参数: steps={best_overall['inference_steps']}, tt_epochs={best_overall['test_time_epochs']}, accuracy={best_overall['overall_accuracy']:.4f}")
+    print(f"最佳像素准确率参数: steps={best_pixel['inference_steps']}, tt_epochs={best_pixel['test_time_epochs']}, accuracy={best_pixel['pixel_accuracy']:.4f}")
+    
+    return summary_df, scan_dir
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test VAE models on ARC tasks")
@@ -321,16 +546,31 @@ if __name__ == "__main__":
     parser.add_argument("--standard_vae", action="store_true", help="Use standard VAE instead of discrete VAE")
     parser.add_argument("--codebook_size", type=int, default=512, help="Codebook size for discrete VAE")
     parser.add_argument("--embedding_dim", type=int, default=64, help="Embedding dimension for discrete VAE")
+    parser.add_argument("--param_scan", action="store_true", help="Perform parameter scanning experiment")
+    parser.add_argument("--gpu", type=int, default=None, help="Specific GPU to use (e.g. 0, 1, etc)")
     
     args = parser.parse_args()
     
-    evaluate_all_tasks(
-        args.model, 
-        args.data, 
-        args.steps, 
-        args.tt_epochs, 
-        not args.no_amp,
-        not args.standard_vae,
-        args.codebook_size,
-        args.embedding_dim
-    )
+    if args.param_scan:
+        # 执行参数扫描实验
+        parameter_scan(
+            args.model,
+            args.data,
+            use_discrete_vae=not args.standard_vae,
+            codebook_size=args.codebook_size,
+            embedding_dim=args.embedding_dim,
+            gpu_id=args.gpu
+        )
+    else:
+        # 正常评估单个参数设置
+        evaluate_all_tasks(
+            args.model, 
+            args.data, 
+            args.steps, 
+            args.tt_epochs, 
+            not args.no_amp,
+            not args.standard_vae,
+            args.codebook_size,
+            args.embedding_dim,
+            args.gpu
+        )

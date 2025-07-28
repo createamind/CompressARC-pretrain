@@ -13,9 +13,11 @@ from discrete_vae import DiscreteVAE as FullDiscreteVAE
 from utils import compute_task_complexity, grid_augmentation
 import time
 from collections import defaultdict
+import datetime
 
 # Dataset class with curriculum learning capability
 class ARCDataset(Dataset):
+    # [保持不变]...
     def __init__(self, data_path):
         self.data_path = data_path
         self.samples = []  # List of (file_path, complexity) tuples
@@ -102,7 +104,7 @@ class ARCDataset(Dataset):
         # Convert to tensors
         return torch.tensor(one_hot, dtype=torch.float), torch.tensor(target_grid, dtype=torch.long)
 
-# 标准VAE损失函数（带周期性KL退火）
+# 标准VAE损失函数和离散VAE损失函数保持不变...
 def vae_loss(reconstruction, x, mu, logvar, beta_weight, current_step, total_steps):
     """
     带周期性KL退火的VAE损失函数
@@ -140,7 +142,7 @@ def vae_loss(reconstruction, x, mu, logvar, beta_weight, current_step, total_ste
     
     return total_loss, recon_loss, beta * kld
 
-# 离散VAE损失函数（重构损失 + VQ损失）
+# 离散VAE损失函数
 def discrete_vae_loss(reconstruction, x, mu, logvar, vq_loss, beta_kl=0.1, beta_vq=1.0, current_step=0, total_steps=1):
     """
     离散VAE损失函数，结合VQ损失和可选的KL损失
@@ -176,19 +178,92 @@ def discrete_vae_loss(reconstruction, x, mu, logvar, vq_loss, beta_kl=0.1, beta_
     
     return total_loss, recon_loss, kl_weight * kld, beta_vq * vq_loss
 
+def check_gpu():
+    """检查并详细报告GPU状态"""
+    if not torch.cuda.is_available():
+        print("警告: 未检测到CUDA，将使用CPU训练 (速度会非常慢)")
+        return False, "cpu", None
+    
+    device_count = torch.cuda.device_count()
+    if device_count == 0:
+        print("警告: 虽然CUDA可用，但未找到可用的GPU设备，将使用CPU训练")
+        return False, "cpu", None
+    
+    # 打印所有可用GPU的详细信息
+    print(f"检测到 {device_count} 个GPU:")
+    for i in range(device_count):
+        gpu_name = torch.cuda.get_device_name(i)
+        total_memory = torch.cuda.get_device_properties(i).total_memory / 1024**3  # GB
+        print(f"  GPU {i}: {gpu_name} ({total_memory:.2f} GB)")
+    
+    # 默认使用第一个GPU
+    device_id = 0
+    device = f"cuda:{device_id}"
+    
+    # 测试内存分配
+    try:
+        test_tensor = torch.zeros((100, 100), device=device)
+        del test_tensor
+        print(f"成功在 {device} 上分配测试张量")
+    except Exception as e:
+        print(f"警告: GPU内存分配测试失败: {e}")
+        print("将尝试继续使用GPU，但可能会遇到问题")
+    
+    return True, device, device_id
+
 def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e-3, 
                beta=1.0, accumulation_steps=4, use_amp=True, use_residual=True,
-               use_discrete_vae=True, codebook_size=512, embedding_dim=64):
+               use_discrete_vae=True, codebook_size=512, embedding_dim=64, gpu_id=None):
     """
     训练VAE模型，可选择使用标准VAE或完全离散VAE
     """
-    # 创建保存目录
-    os.makedirs(save_dir, exist_ok=True)
+    # 创建以时间戳命名的子目录
+    current_time = datetime.datetime.now()
+    timestamp = current_time.strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join(save_dir, timestamp)
+    os.makedirs(run_dir, exist_ok=True)
+    
+    # 保存运行参数到JSON文件
+    params = {
+        "timestamp": timestamp,
+        "start_time": current_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "learning_rate": learning_rate,
+        "beta": beta,
+        "accumulation_steps": accumulation_steps,
+        "use_amp": use_amp,
+        "use_residual": use_residual,
+        "use_discrete_vae": use_discrete_vae,
+        "codebook_size": codebook_size,
+        "embedding_dim": embedding_dim,
+    }
+    
+    with open(os.path.join(run_dir, "train_params.json"), "w") as f:
+        json.dump(params, f, indent=2)
+    
+    # 检查GPU状态
+    has_gpu, device_str, detected_gpu_id = check_gpu()
+    
+    # 如果指定了GPU ID，优先使用指定的GPU
+    if gpu_id is not None and has_gpu:
+        if gpu_id >= torch.cuda.device_count():
+            print(f"警告: 指定的GPU ID {gpu_id} 超出可用GPU数量范围，将使用默认GPU")
+        else:
+            device_str = f"cuda:{gpu_id}"
+            print(f"使用指定的GPU {gpu_id}")
+    
+    device = torch.device(device_str)
     
     # 初始化数据集和数据加载器
     dataset = ARCDataset(data_path)
+    
+    # 设置数据加载器的工作进程数 (根据CPU核心数)
+    num_workers = min(4, os.cpu_count() or 1)
+    
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, 
-                           drop_last=True, num_workers=4, pin_memory=True)
+                            drop_last=True, num_workers=num_workers, 
+                            pin_memory=has_gpu)  # 使用pin_memory加速GPU传输
     
     # 根据选项初始化模型
     if use_discrete_vae:
@@ -205,8 +280,9 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
         print("使用标准VAE模型")
         model = DiscreteVAE(use_residual=use_residual)
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # 将模型移至设备
     model.to(device)
+    print(f"模型已移至设备: {device}")
     
     # 增加权重衰减
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=5e-4)
@@ -214,11 +290,16 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
     # 调整学习率策略
     scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=3, T_mult=2, eta_min=5e-5)
     
-    # 初始化梯度缩放器
+    # 只有在GPU上才使用混合精度训练
+    use_amp = use_amp and has_gpu
     scaler = GradScaler() if use_amp else None
     
     print(f"训练设备: {device}")
+    if has_gpu:
+        print(f"GPU内存使用情况: {torch.cuda.memory_allocated(device)/1024**3:.2f}GB / "
+              f"{torch.cuda.get_device_properties(device).total_memory/1024**3:.2f}GB")
     print(f"数据集大小: {len(dataset)} 样本")
+    print(f"数据加载器工作进程数: {num_workers}")
     print(f"模型参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     print(f"使用自动混合精度: {use_amp}")
     if not use_discrete_vae:
@@ -228,6 +309,7 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
         print(f"嵌入维度: {embedding_dim}")
     print(f"使用梯度累积: {accumulation_steps} 步")
     print(f"权重衰减: 5e-4")
+    print(f"结果将保存到: {run_dir}")
     
     # 计算总步数
     total_steps = epochs * (len(dataloader) // accumulation_steps)
@@ -257,6 +339,7 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
         start_time = time.time()
         
         for batch_idx, (data, target) in enumerate(dataloader):
+            # 确保数据在正确的设备上
             data, target = data.to(device), target.to(device)
             
             # 使用可选的混合精度前向传播
@@ -325,10 +408,16 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
             
             # 打印进度
             if batch_idx % 10 == 0:
+                if has_gpu:
+                    gpu_mem = torch.cuda.memory_allocated(device) / 1024**3
+                    mem_str = f", GPU内存: {gpu_mem:.2f}GB"
+                else:
+                    mem_str = ""
+                    
                 if use_discrete_vae:
                     print(f'轮次: {epoch+1}/{epochs}, 批次: {batch_idx}/{len(dataloader)}, '
                          f'损失: {loss.item():.4f}, 重构: {recon_term.item():.4f}, '
-                         f'KL: {kl_term.item():.4f}, VQ: {vq_term.item():.4f}')
+                         f'KL: {kl_term.item():.4f}, VQ: {vq_term.item():.4f}{mem_str}')
                 else:
                     # 获取当前KL权重
                     cycle_length = total_steps // 3
@@ -337,7 +426,7 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
                     
                     print(f'轮次: {epoch+1}/{epochs}, 批次: {batch_idx}/{len(dataloader)}, '
                          f'损失: {loss.item():.4f}, 重构: {recon_term.item():.4f}, '
-                         f'KL: {kl_term.item():.4f}, KL权重: {current_beta:.4f}')
+                         f'KL: {kl_term.item():.4f}, KL权重: {current_beta:.4f}{mem_str}')
         
         # 更新学习率调度器
         scheduler.step()
@@ -358,10 +447,26 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
             print(f'轮次: {epoch+1}/{epochs}, 耗时: {epoch_time:.2f}s, 平均损失: {avg_loss:.4f}, '
                   f'平均重构: {avg_recon:.4f}, 平均KL: {avg_kl:.4f}, 学习率: {scheduler.get_last_lr()[0]:.6f}')
         
+        # 记录训练日志
+        log_data = {
+            "epoch": epoch + 1,
+            "loss": avg_loss,
+            "recon_loss": avg_recon,
+            "kl_loss": avg_kl,
+            "vq_loss": avg_vq if use_discrete_vae else 0.0,
+            "lr": scheduler.get_last_lr()[0],
+            "time": epoch_time
+        }
+        
+        # 保存训练日志
+        log_path = os.path.join(run_dir, "training_log.jsonl")
+        with open(log_path, "a") as f:
+            f.write(json.dumps(log_data) + "\n")
+        
         # 保存模型检查点
         if (epoch + 1) % 5 == 0 or epoch == epochs - 1:
             model_type = "discrete" if use_discrete_vae else "standard"
-            checkpoint_path = os.path.join(save_dir, f'{model_type}_model_epoch_{epoch+1}.pt')
+            checkpoint_path = os.path.join(run_dir, f'{model_type}_model_epoch_{epoch+1}.pt')
             torch.save({
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
@@ -373,11 +478,11 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
     
     # 保存最终模型
     model_type = "discrete" if use_discrete_vae else "standard"
-    final_model_path = os.path.join(save_dir, f'final_{model_type}_model.pt')
+    final_model_path = os.path.join(run_dir, f'final_{model_type}_model.pt')
     torch.save(model.state_dict(), final_model_path)
     print(f'最终模型已保存到 {final_model_path}')
     
-    return model
+    return model, run_dir
 
 if __name__ == "__main__":
     import argparse
@@ -398,10 +503,11 @@ if __name__ == "__main__":
     parser.add_argument("--codebook_size", type=int, default=512, help="Codebook size for discrete VAE")
     parser.add_argument("--embedding_dim", type=int, default=64, help="Embedding dimension for discrete VAE")
     parser.add_argument("--bg_threshold", type=int, default=40, help="Background color threshold percentage")
+    parser.add_argument("--gpu", type=int, default=0, help="Specific GPU to use (e.g. 0, 1, etc)")
     
     args = parser.parse_args()
     
-    train_model(
+    model, run_dir = train_model(
         data_path=args.data, 
         save_dir=args.save_dir, 
         epochs=args.epochs, 
@@ -413,5 +519,8 @@ if __name__ == "__main__":
         use_residual=not args.no_residual,
         use_discrete_vae=not args.standard_vae,
         codebook_size=args.codebook_size,
-        embedding_dim=args.embedding_dim
+        embedding_dim=args.embedding_dim,
+        gpu_id=args.gpu
     )
+    
+    print(f"训练完成，结果保存在: {run_dir}")

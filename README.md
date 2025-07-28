@@ -24,3 +24,30 @@ python train.py --data /path/to/data --save_dir ./custom_discrete/ --codebook_si
 
 测试离散VAE模型：
 python test.py --model ./discrete_checkpoints/final_discrete_model
+
+参数扫描
+python test.py --model ./checkpoints/1234567890/final_discrete_model.pt --data /path/to/test/data --param_scan
+
+
+
+gpu：
+训练模型（指定GPU）：
+bash
+
+# 使用GPU 0训练
+
+python train.py --data /path/to/data --save_dir ./checkpoints/ --gpu 0
+
+# 使用GPU 1训练
+
+python train.py --data /path/to/data --save_dir ./checkpoints/ --gpu 1
+测试模型（指定GPU）：
+bash
+
+# 在GPU 0上测试
+
+python test.py --model ./checkpoints/20230728_100125/final_discrete_model.pt --data /path/to/test/data --gpu 0
+
+# 参数扫描
+
+python test.py --model ./checkpoints/20230728_100125/final_discrete_model.pt --data /path/to/test/data --param_scan --gpu 0
