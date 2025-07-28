@@ -6,11 +6,12 @@ from tqdm import tqdm
 import random
 
 from arc_compressor import ARCCompressor
-from preprocessing import preprocess_arc_task
+# 修正：导入正确的函数名
+from preprocessing import preprocess_tasks
 from train import train_model
 import config
 
-# 新增导入：从我们之前创建的评估脚本中导入评估函数
+# 导入评估函数
 from evaluate_shared import evaluate_with_shared_weights
 
 def train_shared_weights():
@@ -19,7 +20,6 @@ def train_shared_weights():
     """
     print(f"Using device: {config.DEVICE}")
 
-    # 1. Initialize a single model
     model = ARCCompressor(
         v_dim=config.V_DIM,
         e_dim=config.E_DIM,
@@ -32,7 +32,6 @@ def train_shared_weights():
 
     optimizer = optim.Adam(model.parameters(), lr=config.LEARNING_RATE)
     
-    # 2. Find all training task files
     training_tasks_path = os.path.join(config.ARC_PATH, 'arc-agi_training_challenges.json')
     
     try:
@@ -44,16 +43,16 @@ def train_shared_weights():
         return
 
     task_ids = list(training_tasks.keys())
-    random.shuffle(task_ids) # Shuffle tasks to avoid any order bias
+    random.shuffle(task_ids)
 
     print(f"Found {len(task_ids)} training tasks. Starting training...")
 
-    # 3. Loop through all tasks and train the model
     for task_id in tqdm(task_ids, desc="Training on all tasks"):
         task_data = training_tasks[task_id]
         
         try:
-            input_grids, output_grids, _, _ = preprocess_arc_task(task_data)
+            # 修正：使用正确的函数名 preprocess_tasks 并传入所需参数
+            input_grids, output_grids, _, _ = preprocess_tasks(task_data, config.MAX_H, config.MAX_W)
             
             if not input_grids:
                 tqdm.write(f"Skipping task {task_id}: No valid training pairs found after preprocessing.")
@@ -67,14 +66,14 @@ def train_shared_weights():
                 epochs=config.EPOCHS_PER_TASK,
                 batch_size=config.BATCH_SIZE,
                 device=config.DEVICE,
-                task_id=task_id
+                task_id=task_id,
+                disable_tqdm=True # Disable inner loop tqdm to keep output clean
             )
 
         except Exception as e:
             tqdm.write(f"Error processing task {task_id}: {e}")
             continue
 
-    # 4. Save the final model weights
     try:
         torch.save(model.state_dict(), config.SHARED_WEIGHTS_PATH)
         print(f"\nTraining complete. Shared model weights saved to '{config.SHARED_WEIGHTS_PATH}'")
@@ -83,27 +82,20 @@ def train_shared_weights():
 
 
 if __name__ == '__main__':
-    # --- 步骤 1: 执行训练 ---
     print("--- Starting Shared Weights Training ---")
     train_shared_weights()
     print("--- Shared Weights Training Finished ---")
 
     print("\n" + "="*50 + "\n")
 
-    # --- 步骤 2: 自动开始评估 ---
     print("--- Starting Evaluation with Fine-Tuning ---")
     
-    # 控制测试时微调的步数（训练周期数）
-    # 设置为 0 将禁用微调，行为和我们改动的第一版相同
-    # 设置为正数（例如 200）将在每个任务上微调 200 步以提升准确性
-    TEST_TIME_STEPS = 200
+    TEST_TIME_STEPS = 200 
 
-    # 确定评估文件路径
     eval_file = os.path.join(config.ARC_PATH, 'arc-agi_solutions.json')
     if not os.path.exists(eval_file):
          print(f"'{eval_file}' not found. Evaluating on training set as a demonstration.")
          eval_file = os.path.join(config.ARC_PATH, 'arc-agi_training_challenges.json')
 
-    # 调用评估函数
     evaluate_with_shared_weights(eval_file, fine_tune_steps=TEST_TIME_STEPS)
     print("--- Evaluation Finished ---")

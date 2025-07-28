@@ -3,7 +3,7 @@ import torch
 # --- General ---
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # Path to the ARC dataset
-ARC_PATH = 'arc-prize-2024'
+ARC_PATH = '/home/zdx/github/VSAHDC/ARC-AGI-2'
 # Path to save/load the shared model weights
 SHARED_WEIGHTS_PATH = 'shared_arc_model.pth'
 
