@@ -6,7 +6,6 @@ from tqdm import tqdm
 import random
 
 from arc_compressor import ARCCompressor
-# 修正：从新的 lib.py 导入可重用函数
 from lib import preprocess_task_for_sharing, training_loop
 import config
 
@@ -19,15 +18,12 @@ def train_shared_weights():
     """
     print(f"Using device: {config.DEVICE}")
 
-    model = ARCCompressor(
-        v_dim=config.V_DIM,
-        e_dim=config.E_DIM,
-        l_dim=config.L_DIM,
-        n_heads=config.N_HEADS,
-        n_blocks=config.N_BLOCKS,
-        dropout=config.DROPOUT,
-        device=config.DEVICE
-    ).to(config.DEVICE)
+    # ==============================================================================
+    # 核心修正：调用 ARCCompressor 时不再传入任何参数。
+    # 类本身会从 config.py 文件读取所有配置。
+    # .to(config.DEVICE) 会将模型移动到正确的设备。
+    # ==============================================================================
+    model = ARCCompressor().to(config.DEVICE)
 
     optimizer = optim.Adam(model.parameters(), lr=config.LEARNING_RATE)
     
@@ -51,14 +47,12 @@ def train_shared_weights():
         task_data = training_tasks[task_id]
         
         try:
-            # 修正：使用 lib.py 中的预处理函数
             input_grids, output_grids, _, _ = preprocess_task_for_sharing(task_data, config.MAX_H, config.MAX_W)
             
             if not input_grids:
                 tqdm.write(f"Skipping task {task_id}: No valid training pairs found.")
                 continue
 
-            # 修正：使用 lib.py 中的训练循环函数
             training_loop(
                 model=model,
                 optimizer=optimizer,
@@ -68,7 +62,7 @@ def train_shared_weights():
                 batch_size=config.BATCH_SIZE,
                 device=config.DEVICE,
                 task_id=task_id,
-                disable_tqdm=True # 禁用内部循环的tqdm，保持主进度条清晰
+                disable_tqdm=True
             )
 
         except Exception as e:

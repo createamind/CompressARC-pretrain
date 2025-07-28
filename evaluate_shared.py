@@ -6,7 +6,6 @@ from tqdm import tqdm
 import copy
 
 from arc_compressor import ARCCompressor
-# 修正：从新的 lib.py 导入可重用函数
 from lib import preprocess_task_for_sharing, training_loop
 import config
 
@@ -18,15 +17,10 @@ def evaluate_with_shared_weights(tasks_file_path, output_dir="evaluation_outputs
     print(f"Test-time fine-tuning steps per task: {fine_tune_steps}")
     os.makedirs(output_dir, exist_ok=True)
 
-    base_model = ARCCompressor(
-        v_dim=config.V_DIM,
-        e_dim=config.E_DIM,
-        l_dim=config.L_DIM,
-        n_heads=config.N_HEADS,
-        n_blocks=config.N_BLOCKS,
-        dropout=config.DROPOUT,
-        device=config.DEVICE
-    ).to(config.DEVICE)
+    # ==============================================================================
+    # 核心修正：同样，在这里调用 ARCCompressor 时也不再传入任何参数。
+    # ==============================================================================
+    base_model = ARCCompressor().to(config.DEVICE)
 
     try:
         base_model.load_state_dict(torch.load(config.SHARED_WEIGHTS_PATH, map_location=config.DEVICE))
@@ -56,12 +50,10 @@ def evaluate_with_shared_weights(tasks_file_path, output_dir="evaluation_outputs
 
         task_model = copy.deepcopy(base_model)
         
-        # 修正：使用 lib.py 中的预处理函数
         train_in_grids, train_out_grids, test_in_grids, _ = preprocess_task_for_sharing(task_data, config.MAX_H, config.MAX_W)
 
         if fine_tune_steps > 0 and train_in_grids:
             optimizer = optim.Adam(task_model.parameters(), lr=config.LEARNING_RATE / 10)
-            # 修正：使用 lib.py 中的训练循环函数进行微调
             training_loop(
                 model=task_model,
                 optimizer=optimizer,
