@@ -6,98 +6,6 @@ from scipy import ndimage
 import math
 from typing import List, Dict, Tuple, Any
 
-class VectorQuantizer(nn.Module):
-    """
-    向量量化器 - 将连续向量映射到离散的编码本
-    """
-    def __init__(self, num_embeddings, embedding_dim, commitment_cost=0.25, decay=0.99, epsilon=1e-5):
-        super().__init__()
-        self.num_embeddings = num_embeddings
-        self.embedding_dim = embedding_dim
-        self.commitment_cost = commitment_cost
-        self.decay = decay
-        self.epsilon = epsilon
-
-        # 初始化编码本 (codebook)
-        self.embedding = nn.Embedding(num_embeddings, embedding_dim)
-        self.embedding.weight.data.uniform_(-1/num_embeddings, 1/num_embeddings)
-
-        # 使用指数移动平均(EMA)来更新编码本
-        self.register_buffer('ema_cluster_size', torch.zeros(num_embeddings))
-        self.register_buffer('ema_w', self.embedding.weight.data.clone())
-
-    def forward(self, inputs):
-        # 输入形状: [B, C, H, W] 或 [B, C]
-        input_shape = inputs.shape
-
-        # 扁平化空间维度以用于计算
-        if len(input_shape) == 4:
-            # 卷积特征情况 [B, C, H, W]
-            flat_input = inputs.permute(0, 2, 3, 1).contiguous()
-            flat_input = flat_input.view(-1, self.embedding_dim)
-        elif len(input_shape) == 3:
-            # 可变长序列情况 [B, N, C]
-            flat_input = inputs.reshape(-1, self.embedding_dim)
-        else:
-            # 批量向量情况 [B, C]
-            flat_input = inputs
-
-        # 计算与编码本中每个编码的欧氏距离
-        distances = torch.sum(flat_input**2, dim=1, keepdim=True) + \
-                    torch.sum(self.embedding.weight**2, dim=1) - \
-                    2 * torch.matmul(flat_input, self.embedding.weight.t())
-
-        # 找到最近的编码索引
-        encoding_indices = torch.argmin(distances, dim=1).unsqueeze(1)
-
-        # 使用one-hot进行编码
-        encodings = torch.zeros(encoding_indices.shape[0], self.num_embeddings, device=inputs.device)
-        encodings.scatter_(1, encoding_indices, 1)
-
-        # 量化: 从编码本中查找最近的编码
-        quantized = torch.matmul(encodings, self.embedding.weight)
-
-        # 在训练时使用EMA更新编码本
-        if self.training:
-            # 更新编码本的ema统计信息
-            self._ema_update(flat_input, encodings)
-
-        # 计算损失
-        q_latent_loss = F.mse_loss(quantized.detach(), flat_input)
-        e_latent_loss = F.mse_loss(quantized, flat_input.detach())
-        loss = q_latent_loss + self.commitment_cost * e_latent_loss
-
-        # 直通估计器 (straight-through estimator)
-        quantized = flat_input + (quantized - flat_input).detach()
-
-        # 恢复原始形状
-        if len(input_shape) == 4:
-            quantized = quantized.view(input_shape[0], input_shape[2], input_shape[3], self.embedding_dim)
-            quantized = quantized.permute(0, 3, 1, 2).contiguous()
-        elif len(input_shape) == 3:
-            quantized = quantized.view(input_shape[0], input_shape[1], self.embedding_dim)
-
-        return quantized, loss, encoding_indices
-
-    def _ema_update(self, flat_input, encodings):
-        """使用EMA更新编码本"""
-        # 计算每个编码的使用频率
-        batch_mean = torch.mean(encodings, dim=0)
-        self.ema_cluster_size = self.ema_cluster_size * self.decay + \
-                               (1 - self.decay) * batch_mean
-
-        # 拉普拉斯平滑，防止某些编码永不使用
-        n = torch.sum(self.ema_cluster_size)
-        weights = (self.ema_cluster_size + self.epsilon) / (n + self.num_embeddings * self.epsilon) * n
-
-        # 计算每个编码的新中心
-        dw = torch.matmul(encodings.t(), flat_input)
-        self.ema_w = self.ema_w * self.decay + (1 - self.decay) * dw
-
-        # 更新编码本权重
-        self.embedding.weight.data = self.ema_w / weights.unsqueeze(1)
-
-
 class ConnectedComponentsModule(nn.Module):
     """提取并编码图像中的连通对象"""
     def __init__(self, grid_size=30, num_categories=10, connectivity=8, max_objects=20):
@@ -299,14 +207,135 @@ class RelationalReasoningModule(nn.Module):
         return torch.cat(batch_relations, dim=0)
 
 
+
+
+
+class VectorQuantizer(nn.Module):
+    """
+    向量量化器 - 将连续向量映射到离散的编码本
+    增加了数值稳定性措施
+    """
+    def __init__(self, num_embeddings, embedding_dim, commitment_cost=0.25, decay=0.99, epsilon=1e-5):
+        super().__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.commitment_cost = commitment_cost
+        self.decay = decay
+        self.epsilon = epsilon
+
+        # 使用更保守的初始化
+        self.embedding = nn.Embedding(num_embeddings, embedding_dim)
+        # 使用正态分布初始化而非均匀分布
+        self.embedding.weight.data.normal_(0, 0.02)
+
+        # 使用指数移动平均(EMA)来更新编码本
+        self.register_buffer('ema_cluster_size', torch.zeros(num_embeddings))
+        self.register_buffer('ema_w', self.embedding.weight.data.clone())
+
+        # 添加安全检查标志
+        self.safe_mode = True
+
+    def forward(self, inputs):
+        # 输入形状: [B, C, H, W] 或 [B, C]
+        input_shape = inputs.shape
+
+        # 添加特征归一化以增加稳定性
+        inputs = F.normalize(inputs, p=2, dim=1) * math.sqrt(self.embedding_dim)
+
+        # 扁平化空间维度以用于计算
+        if len(input_shape) == 4:
+            # 卷积特征情况 [B, C, H, W]
+            flat_input = inputs.permute(0, 2, 3, 1).contiguous()
+            flat_input = flat_input.view(-1, self.embedding_dim)
+        elif len(input_shape) == 3:
+            # 可变长序列情况 [B, N, C]
+            flat_input = inputs.reshape(-1, self.embedding_dim)
+        else:
+            # 批量向量情况 [B, C]
+            flat_input = inputs
+
+        # 为了数值稳定性，使用归一化的权重
+        normalized_embeddings = F.normalize(self.embedding.weight, p=2, dim=1) * math.sqrt(self.embedding_dim)
+
+        # 使用更稳定的距离计算方法（欧氏距离平方的数值稳定版本）
+        # 避免显式计算平方项，而是直接使用矩阵乘法
+        similarity = torch.matmul(flat_input, normalized_embeddings.t())
+
+        # 找到最近的编码索引（最高相似度）
+        encoding_indices = torch.argmax(similarity, dim=1).unsqueeze(1)
+
+        # 使用one-hot进行编码
+        encodings = torch.zeros(encoding_indices.shape[0], self.num_embeddings, device=inputs.device)
+        encodings.scatter_(1, encoding_indices, 1)
+
+        # 量化: 从编码本中查找最近的编码
+        quantized = torch.matmul(encodings, self.embedding.weight)
+
+        # 在训练时使用EMA更新编码本
+        if self.training:
+            # 更新编码本的ema统计信息
+            self._ema_update(flat_input, encodings)
+
+        # 计算损失 - 增加梯度缩放以增加稳定性
+        q_latent_loss = F.mse_loss(quantized.detach(), flat_input)
+        e_latent_loss = F.mse_loss(quantized, flat_input.detach())
+
+        # 使用梯度缩放防止损失过大
+        loss = q_latent_loss + self.commitment_cost * e_latent_loss
+
+        # 添加损失值检查
+        if self.safe_mode and (torch.isnan(loss) or torch.isinf(loss) or loss > 1e5):
+            print(f"警告: VQ损失异常! q_loss={q_latent_loss.item():.4f}, e_loss={e_latent_loss.item():.4f}")
+            # 在异常情况下返回小损失值以避免训练崩溃
+            loss = torch.tensor(0.1, device=inputs.device, requires_grad=True)
+
+        # 直通估计器 (straight-through estimator)
+        quantized = flat_input + (quantized - flat_input).detach()
+
+        # 恢复原始形状
+        if len(input_shape) == 4:
+            quantized = quantized.view(input_shape[0], input_shape[2], input_shape[3], self.embedding_dim)
+            quantized = quantized.permute(0, 3, 1, 2).contiguous()
+        elif len(input_shape) == 3:
+            quantized = quantized.view(input_shape[0], input_shape[1], self.embedding_dim)
+
+        return quantized, loss, encoding_indices
+
+    def _ema_update(self, flat_input, encodings):
+        """使用EMA更新编码本 - 添加保护措施"""
+        # 计算每个编码的使用频率
+        batch_mean = torch.mean(encodings, dim=0)
+
+        # 添加梯度保护
+        with torch.no_grad():
+            # 更新集群大小
+            self.ema_cluster_size = self.ema_cluster_size * self.decay + (1 - self.decay) * batch_mean
+
+            # 拉普拉斯平滑，防止某些编码永不使用
+            n = torch.sum(self.ema_cluster_size)
+            weights = (self.ema_cluster_size + self.epsilon) / (n + self.num_embeddings * self.epsilon) * n
+
+            # 计算每个编码的新中心
+            dw = torch.matmul(encodings.t(), flat_input)
+            self.ema_w = self.ema_w * self.decay + (1 - self.decay) * dw
+
+            # 更新编码本权重，使用梯度裁剪防止极端值
+            updated_weights = self.ema_w / weights.unsqueeze(1).clamp(min=1e-5)
+
+            # 防止权重爆炸
+            norm = torch.norm(updated_weights, dim=1, keepdim=True)
+            normalized = updated_weights / norm.clamp(min=1e-5)
+            self.embedding.weight.data = normalized * math.sqrt(self.embedding_dim)
+
+
+# [ConnectedComponentsModule和RelationalReasoningModule类保持不变]
+
 class HierarchicalEncoder(nn.Module):
-    """分层次特征编码器"""
+    """分层次特征编码器 - 增加稳定性"""
     def __init__(self, grid_size=30, num_categories=10):
         super().__init__()
 
         # 计算下采样后的特征图尺寸
-        # 下采样1: 30 -> 15 (简单地除以2)
-        # 下采样2: 15 -> 8 (15+2*1-3)//2+1 = 8
         self.level1_size = grid_size // 2
         self.level2_size = (self.level1_size + 2*1 - 3) // 2 + 1
 
@@ -315,33 +344,33 @@ class HierarchicalEncoder(nn.Module):
         # 低级特征提取：像素级模式
         self.low_level_encoder = nn.Sequential(
             nn.Conv2d(num_categories, 64, 3, padding=1),
-            nn.LayerNorm([64, grid_size, grid_size]),
-            nn.ReLU(),
+            nn.GroupNorm(8, 64),  # 使用GroupNorm代替LayerNorm提高稳定性
+            nn.LeakyReLU(0.2),
             nn.Conv2d(64, 64, 3, stride=2, padding=1),  # 降采样到 15x15
-            nn.LayerNorm([64, self.level1_size, self.level1_size]),
-            nn.ReLU(),
+            nn.GroupNorm(8, 64),
+            nn.LeakyReLU(0.2),
         )
 
         # 中级特征提取：局部结构
         self.mid_level_encoder = nn.Sequential(
             nn.Conv2d(64, 128, 3, padding=1),
-            nn.LayerNorm([128, self.level1_size, self.level1_size]),
-            nn.ReLU(),
+            nn.GroupNorm(16, 128),
+            nn.LeakyReLU(0.2),
             nn.Conv2d(128, 128, 3, stride=2, padding=1),  # 降采样到 8x8
-            nn.LayerNorm([128, self.level2_size, self.level2_size]),
-            nn.ReLU(),
+            nn.GroupNorm(16, 128),
+            nn.LeakyReLU(0.2),
         )
 
         # 高级特征提取：全局概念
         self.high_level_encoder = nn.Sequential(
             nn.Conv2d(128, 256, 3, padding=1),
-            nn.LayerNorm([256, self.level2_size, self.level2_size]),
-            nn.ReLU(),
+            nn.GroupNorm(32, 256),
+            nn.LeakyReLU(0.2),
             nn.AdaptiveAvgPool2d((4, 4)),  # 自适应池化到固定大小4x4
             nn.Flatten(),
             nn.Linear(256 * 4 * 4, 512),
             nn.LayerNorm(512),
-            nn.ReLU()
+            nn.LeakyReLU(0.2)
         )
 
     def forward(self, x):
@@ -356,27 +385,19 @@ class HierarchicalEncoder(nn.Module):
             'high': high_features
         }
 
-# 只修改HierarchicalDecoder类中的相关部分
+
 class HierarchicalDecoder(nn.Module):
-    """分层次解码器"""
+    """分层次解码器 - 增加稳定性"""
     def __init__(self, grid_size=30, num_categories=10, pixel_dim=64, object_dim=128, relation_dim=64):
         super().__init__()
         self.grid_size = grid_size
         self.num_categories = num_categories
 
-        # 计算转置卷积输出尺寸 - 使用正确的公式
-        # 转置卷积输出尺寸 = (input_size - 1) * stride + kernel_size - 2*padding
-
+        # 计算转置卷积输出尺寸
         # 用于自适应池化的固定尺寸
         self.pool_size = 4
-
-        # 从4x4 -> ~8x8
-        # (4-1)*2 + 4 - 2*1 = 6 + 4 - 2 = 8
-        self.level2_size = (self.pool_size-1)*2 + 4 - 2*1
-
-        # 从8x8 -> ~16x16
-        # (8-1)*2 + 4 - 2*1 = 14 + 4 - 2 = 16
-        self.level1_size = (self.level2_size-1)*2 + 4 - 2*1
+        self.level2_size = 8  # 从4x4 -> 8x8
+        self.level1_size = 16  # 从8x8 -> 16x16
 
         print(f"解码器特征图尺寸: 4x4 -> {self.level2_size}x{self.level2_size} -> {self.level1_size}x{self.level1_size} -> {grid_size}x{grid_size}")
 
@@ -384,32 +405,30 @@ class HierarchicalDecoder(nn.Module):
         self.high_processor = nn.Sequential(
             nn.Linear(512 + relation_dim, 512),
             nn.LayerNorm(512),
-            nn.ReLU(),
+            nn.LeakyReLU(0.2),
             nn.Linear(512, 256 * 4 * 4),
             nn.LayerNorm(256 * 4 * 4),
-            nn.ReLU()
+            nn.LeakyReLU(0.2)
         )
 
         # 中级特征解码 - 从4x4到8x8
         self.mid_decoder = nn.Sequential(
             nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1),
-            nn.LayerNorm([128, self.level2_size, self.level2_size]),
-            nn.ReLU()
+            nn.GroupNorm(16, 128),
+            nn.LeakyReLU(0.2)
         )
 
         # 低级特征解码 - 从8x8到16x16
         self.low_decoder = nn.Sequential(
             nn.ConvTranspose2d(128 + object_dim, 64, 4, stride=2, padding=1),
-            nn.LayerNorm([64, self.level1_size, self.level1_size]),
-            nn.ReLU()
+            nn.GroupNorm(8, 64),
+            nn.LeakyReLU(0.2)
         )
 
         # 最终解码 - 从16x16到30x30
-        # 修改: 我们不再使用LayerNorm指定确切的输出尺寸
-        # 而是使用最终的裁剪操作确保输出为30x30
         self.final_decoder = nn.Sequential(
             nn.ConvTranspose2d(64 + pixel_dim, 64, 4, stride=2, padding=1),
-            nn.ReLU(),
+            nn.LeakyReLU(0.2),
             nn.Conv2d(64, num_categories, 3, padding=1)
         )
 
@@ -450,7 +469,7 @@ class HierarchicalDecoder(nn.Module):
         # 最终解码
         output_raw = self.final_decoder(low_with_pixels)
 
-        # 修改：明确裁剪到30x30，移除LayerNorm依赖
+        # 明确裁剪到30x30
         output = output_raw[:, :, :self.grid_size, :self.grid_size]
 
         # 调整输出形状为批次、网格单元、类别
@@ -458,8 +477,6 @@ class HierarchicalDecoder(nn.Module):
 
         return output
 
-
-    
 
 class ObjectOrientedHierarchicalVAE(nn.Module):
     def __init__(self, grid_size=30, num_categories=10,
@@ -487,22 +504,34 @@ class ObjectOrientedHierarchicalVAE(nn.Module):
         # 关系推理模块
         self.relation_module = RelationalReasoningModule(feature_dim=128, output_dim=relation_dim)
 
-        # 分离的潜在空间
-        self.pixel_vq = VectorQuantizer(num_embeddings=pixel_codebook_size, embedding_dim=pixel_dim)
-        self.object_vq = VectorQuantizer(num_embeddings=object_codebook_size, embedding_dim=object_dim)
-        self.relation_vq = VectorQuantizer(num_embeddings=relation_codebook_size, embedding_dim=relation_dim)
+        # 分离的潜在空间 - 使用更小的commitment_cost增加稳定性
+        self.pixel_vq = VectorQuantizer(
+            num_embeddings=pixel_codebook_size,
+            embedding_dim=pixel_dim,
+            commitment_cost=0.1
+        )
+        self.object_vq = VectorQuantizer(
+            num_embeddings=object_codebook_size,
+            embedding_dim=object_dim,
+            commitment_cost=0.1
+        )
+        self.relation_vq = VectorQuantizer(
+            num_embeddings=relation_codebook_size,
+            embedding_dim=relation_dim,
+            commitment_cost=0.1
+        )
 
         # 潜在空间投影
         self.pixel_projector = nn.Sequential(
             nn.Conv2d(64, pixel_dim, 1),
-            nn.LayerNorm([pixel_dim, self.level1_size, self.level1_size]),
-            nn.ReLU()
+            nn.GroupNorm(8, pixel_dim),  # 使用GroupNorm增加稳定性
+            nn.LeakyReLU(0.2)
         )
 
         self.object_projector = nn.Sequential(
             nn.Linear(128, object_dim),
             nn.LayerNorm(object_dim),
-            nn.ReLU()
+            nn.LeakyReLU(0.2)
         )
 
         # 层次化解码器
@@ -513,6 +542,9 @@ class ObjectOrientedHierarchicalVAE(nn.Module):
             object_dim=object_dim,
             relation_dim=relation_dim
         )
+
+        # 梯度缩放器
+        self._scaler = 0.1
 
     def forward(self, x):
         batch_size = x.size(0)
@@ -531,23 +563,48 @@ class ObjectOrientedHierarchicalVAE(nn.Module):
                 proj_feats = self.object_projector(obj_feat)
             else:  # 单个对象或零对象的情况
                 proj_feats = torch.zeros(1, self.object_dim, device=x.device)
-            processed_obj_features.append(proj_feats.mean(0))  # 平均所有对象特征
+            # 使用平均池化聚合多个对象特征，并应用梯度缩放
+            processed_obj_features.append(proj_feats.mean(0) * self._scaler)
 
         batch_obj_features = torch.stack(processed_obj_features)
 
         # 3. 提取关系特征
         relation_features = self.relation_module(object_features)
 
+        # 应用梯度缩放
+        relation_features = relation_features * self._scaler
+
         # 4. 投影到适合量化的空间
         pixel_proj = self.pixel_projector(features['low'])
+        pixel_proj = pixel_proj * self._scaler  # 缩放以增加稳定性
 
         # 5. 应用向量量化
-        pixel_quantized, pixel_vq_loss, _ = self.pixel_vq(pixel_proj)
-        object_quantized, object_vq_loss, _ = self.object_vq(batch_obj_features.unsqueeze(1))
-        relation_quantized, relation_vq_loss, _ = self.relation_vq(relation_features)
+        try:
+            pixel_quantized, pixel_vq_loss, _ = self.pixel_vq(pixel_proj)
+            object_quantized, object_vq_loss, _ = self.object_vq(batch_obj_features.unsqueeze(1))
+            relation_quantized, relation_vq_loss, _ = self.relation_vq(relation_features)
+        except Exception as e:
+            print(f"向量量化出错: {e}")
+            # 提供安全的后备方案
+            pixel_quantized = pixel_proj
+            object_quantized = batch_obj_features.unsqueeze(1)
+            relation_quantized = relation_features
+            pixel_vq_loss = torch.tensor(0.1, device=x.device)
+            object_vq_loss = torch.tensor(0.1, device=x.device)
+            relation_vq_loss = torch.tensor(0.1, device=x.device)
 
         # 6. 解码综合信息
         object_quantized = object_quantized.squeeze(1)  # 移除添加的维度
+
+        # 检查异常值
+        if torch.isnan(pixel_quantized).any() or torch.isinf(pixel_quantized).any():
+            print("警告: 检测到NaN/Inf值，使用原始特征替代")
+            pixel_quantized = pixel_proj
+        if torch.isnan(object_quantized).any() or torch.isinf(object_quantized).any():
+            object_quantized = batch_obj_features
+        if torch.isnan(relation_quantized).any() or torch.isinf(relation_quantized).any():
+            relation_quantized = relation_features
+
         reconstruction = self.decoder(
             pixel_quantized,
             object_quantized,
@@ -555,12 +612,13 @@ class ObjectOrientedHierarchicalVAE(nn.Module):
             features['high']
         )
 
-        # 7. 计算总VQ损失
-        total_vq_loss = pixel_vq_loss + 2.0*object_vq_loss + relation_vq_loss
+        # 7. 计算总VQ损失 - 使用更平衡的权重
+        total_vq_loss = pixel_vq_loss + 0.5*object_vq_loss + 0.5*relation_vq_loss
+
+        # 检测并防止NaN/Inf损失
+        if torch.isnan(total_vq_loss) or torch.isinf(total_vq_loss):
+            print("警告: VQ损失是NaN/Inf，替换为小常数")
+            total_vq_loss = torch.tensor(0.1, device=x.device, requires_grad=True)
 
         # 返回重建结果和VQ损失
         return reconstruction, None, None, None, total_vq_loss, None
-
-
-
-

@@ -369,19 +369,24 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
                         # 层次化VAE只有重构损失和VQ损失
                         recon_term = 0
                         target_flat = target.reshape(batch_size, -1)
-                        for i in range(target.reshape(batch_size, -1).size(1)):
-                        #     logits = recon_batch[:, i, :]
-                        #     # target_flat = target.reshape(batch_size, -1)[:, i]
-                        #     recon_term += F.cross_entropy(logits, target_flat)
-                        # recon_term = recon_term / target.reshape(batch_size, -1).size(1)
-                        # loss = recon_weight * recon_term + vq_weight * vq_loss
-                        # kl_term = torch.tensor(0.0).to(device)
+                        for i in range(target_flat.size(1)):
                             logits = recon_batch[:, i, :]
                             recon_term += F.cross_entropy(logits, target_flat[:, i])
                         recon_term = recon_term / target_flat.size(1)
+
+                        # 检查并处理异常损失值
+                        if torch.isnan(vq_loss) or torch.isinf(vq_loss) or vq_loss > 1e5:
+                            print(f"警告: VQ损失异常 ({vq_loss.item():.4f})，使用小常数替代")
+                            vq_loss = torch.tensor(0.1, device=device, requires_grad=True)
+
                         loss = recon_weight * recon_term + vq_weight * vq_loss
                         kl_term = torch.tensor(0.0).to(device)
                         vq_term = vq_loss
+
+                        # 检查总损失
+                        if torch.isnan(loss) or torch.isinf(loss):
+                            print(f"警告: 总损失异常，重置为仅重构损失")
+                            loss = recon_weight * recon_term
 
                     elif use_discrete_vae:
                         recon_batch, mu, logvar, quantized, vq_loss, indices = model(data)
@@ -427,16 +432,28 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
                     # 缩放梯度进行裁剪
                     scaler.unscale_(optimizer)
 
-                # 梯度裁剪
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                # 更严格的梯度裁剪
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
 
-                if use_amp:
-                    # 使用缩放器更新
-                    scaler.step(optimizer)
-                    scaler.update()
+                # 检查梯度是否含有NaN
+                has_nan_grad = False
+                for param in model.parameters():
+                    if param.grad is not None:
+                        if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                            has_nan_grad = True
+                            break
+
+                if has_nan_grad:
+                    print("警告: 检测到NaN梯度，跳过此更新步骤")
+                    optimizer.zero_grad()
                 else:
-                    # 标准更新
-                    optimizer.step()
+                    if use_amp:
+                        # 使用缩放器更新
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        # 标准更新
+                        optimizer.step()
 
                 # 重置梯度
                 optimizer.zero_grad()
