@@ -519,7 +519,8 @@ class ObjectOrientedHierarchicalVAE(nn.Module):
             if obj_feat.shape[0] > 1:  # 有多个对象
                 proj_feats = self.object_projector(obj_feat)
             else:  # 单个对象或零对象的情况
-                proj_feats = torch.zeros(1, self.object_projector[-2].out_features, device=x.device)
+                # 修复：使用self.object_dim代替self.object_projector[-2].out_features
+                proj_feats = torch.zeros(1, self.object_dim, device=x.device)
             processed_obj_features.append(proj_feats.mean(0))  # 平均所有对象特征
 
         batch_obj_features = torch.stack(processed_obj_features)
