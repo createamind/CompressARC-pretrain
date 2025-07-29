@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset, Subset, WeightedRandomSampler
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 import numpy as np
 import os
@@ -14,6 +14,8 @@ from utils import compute_task_complexity, grid_augmentation
 import time
 from collections import defaultdict
 import datetime
+from hierarchical_vae import ObjectOrientedHierarchicalVAE
+
 
 # Dataset class with curriculum learning capability
 class ARCDataset(Dataset):
@@ -211,9 +213,11 @@ def check_gpu():
 
     return True, device, device_id
 
+
 def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e-3,
                beta=1.0, accumulation_steps=4, use_amp=True, use_residual=True,
-               use_discrete_vae=True, codebook_size=512, embedding_dim=64, gpu_id=None):
+               use_discrete_vae=True, codebook_size=512, embedding_dim=64, gpu_id=None,
+               use_hierarchical_vae=False, recon_weight=1.0, vq_weight=1.0):
     """
     训练VAE模型，可选择使用标准VAE或完全离散VAE
     """
@@ -266,7 +270,20 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
                             pin_memory=has_gpu)  # 使用pin_memory加速GPU传输
 
     # 根据选项初始化模型
-    if use_discrete_vae:
+
+    if use_hierarchical_vae:
+        print("使用层次化面向对象VAE模型")
+        model = ObjectOrientedHierarchicalVAE(
+            grid_size=30,
+            num_categories=10,
+            pixel_codebook_size=512,
+            object_codebook_size=256,
+            relation_codebook_size=128,
+            pixel_dim=64,
+            object_dim=128,
+            relation_dim=64
+        )
+    elif use_discrete_vae:
         print("使用完全离散化VAE模型")
         model = FullDiscreteVAE(
             grid_size=30,
@@ -279,6 +296,8 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
     else:
         print("使用标准VAE模型")
         model = DiscreteVAE(use_residual=use_residual)
+
+
 
     # 将模型移至设备
     model.to(device)
@@ -345,7 +364,26 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
             # 使用可选的混合精度前向传播
             if use_amp:
                 with autocast():
-                    if use_discrete_vae:
+                    if use_hierarchical_vae:
+                        recon_batch, _, _, _, vq_loss, _ = model(data)
+                        # 层次化VAE只有重构损失和VQ损失
+                        recon_term = 0
+                        target_flat = target.reshape(batch_size, -1)
+                        for i in range(target.reshape(batch_size, -1).size(1)):
+                        #     logits = recon_batch[:, i, :]
+                        #     # target_flat = target.reshape(batch_size, -1)[:, i]
+                        #     recon_term += F.cross_entropy(logits, target_flat)
+                        # recon_term = recon_term / target.reshape(batch_size, -1).size(1)
+                        # loss = recon_weight * recon_term + vq_weight * vq_loss
+                        # kl_term = torch.tensor(0.0).to(device)
+                            logits = recon_batch[:, i, :]
+                            recon_term += F.cross_entropy(logits, target_flat[:, i])
+                        recon_term = recon_term / target_flat.size(1)
+                        loss = recon_weight * recon_term + vq_weight * vq_loss
+                        kl_term = torch.tensor(0.0).to(device)
+                        vq_term = vq_loss
+
+                    elif use_discrete_vae:
                         recon_batch, mu, logvar, quantized, vq_loss, indices = model(data)
                         loss, recon_term, kl_term, vq_term = discrete_vae_loss(
                             recon_batch, target, mu, logvar, vq_loss, beta_kl=0.1, beta_vq=1.0,
@@ -504,10 +542,17 @@ if __name__ == "__main__":
     parser.add_argument("--embedding_dim", type=int, default=64, help="Embedding dimension for discrete VAE")
     parser.add_argument("--bg_threshold", type=int, default=40, help="Background color threshold percentage")
     parser.add_argument("--gpu", type=int, default=0, help="Specific GPU to use (e.g. 0, 1, etc)")
+    parser.add_argument("--hierarchical_vae", action="store_true", help="Use hierarchical object-oriented VAE")
+    parser.add_argument("--recon_weight", type=float, default=1.0, help="Weight for reconstruction loss")
+    parser.add_argument("--vq_weight", type=float, default=1.0, help="Weight for VQ loss")
+
 
     args = parser.parse_args()
 
     model, run_dir = train_model(
+        use_hierarchical_vae=args.hierarchical_vae,
+        recon_weight=args.recon_weight,
+        vq_weight=args.vq_weight,
         data_path=args.data,
         save_dir=args.save_dir,
         epochs=args.epochs,
