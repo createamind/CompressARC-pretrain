@@ -363,7 +363,7 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
 
             # 使用可选的混合精度前向传播
             if use_amp:
-                with autocast():
+                with autocast(device_type=device.type):
                     if use_hierarchical_vae:
                         recon_batch, _, _, _, vq_loss, _ = model(data)
                         # 层次化VAE只有重构损失和VQ损失

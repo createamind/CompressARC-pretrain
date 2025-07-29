@@ -356,6 +356,7 @@ class HierarchicalEncoder(nn.Module):
             'high': high_features
         }
 
+# 只修改HierarchicalDecoder类中的相关部分
 class HierarchicalDecoder(nn.Module):
     """分层次解码器"""
     def __init__(self, grid_size=30, num_categories=10, pixel_dim=64, object_dim=128, relation_dim=64):
@@ -376,10 +377,6 @@ class HierarchicalDecoder(nn.Module):
         # 从8x8 -> ~16x16
         # (8-1)*2 + 4 - 2*1 = 14 + 4 - 2 = 16
         self.level1_size = (self.level2_size-1)*2 + 4 - 2*1
-
-        # 从16x16 -> ~32x32
-        # (16-1)*2 + 4 - 2*1 = 30 + 4 - 2 = 32
-        # 但我们希望保持与原始大小一致，所以最后一层会做特殊处理
 
         print(f"解码器特征图尺寸: 4x4 -> {self.level2_size}x{self.level2_size} -> {self.level1_size}x{self.level1_size} -> {grid_size}x{grid_size}")
 
@@ -408,10 +405,10 @@ class HierarchicalDecoder(nn.Module):
         )
 
         # 最终解码 - 从16x16到30x30
-        # 使用自定义的输出填充来获得精确的30x30输出
+        # 修改: 我们不再使用LayerNorm指定确切的输出尺寸
+        # 而是使用最终的裁剪操作确保输出为30x30
         self.final_decoder = nn.Sequential(
-            nn.ConvTranspose2d(64 + pixel_dim, 64, 4, stride=2, padding=1, output_padding=0),
-            nn.LayerNorm([64, self.level1_size*2-2, self.level1_size*2-2]),
+            nn.ConvTranspose2d(64 + pixel_dim, 64, 4, stride=2, padding=1),
             nn.ReLU(),
             nn.Conv2d(64, num_categories, 3, padding=1)
         )
@@ -453,13 +450,8 @@ class HierarchicalDecoder(nn.Module):
         # 最终解码
         output_raw = self.final_decoder(low_with_pixels)
 
-        # 裁剪或填充到目标大小 30x30
-        current_h, current_w = output_raw.shape[2], output_raw.shape[3]
-        if current_h > self.grid_size or current_w > self.grid_size:
-            output = output_raw[:, :, :self.grid_size, :self.grid_size]
-        else:
-            # 如果尺寸太小，使用填充
-            output = F.pad(output_raw, (0, self.grid_size - current_w, 0, self.grid_size - current_h))
+        # 修改：明确裁剪到30x30，移除LayerNorm依赖
+        output = output_raw[:, :, :self.grid_size, :self.grid_size]
 
         # 调整输出形状为批次、网格单元、类别
         output = output.permute(0, 2, 3, 1).reshape(batch_size, -1, self.num_categories)
@@ -467,6 +459,7 @@ class HierarchicalDecoder(nn.Module):
         return output
 
 
+    
 
 class ObjectOrientedHierarchicalVAE(nn.Module):
     def __init__(self, grid_size=30, num_categories=10,
