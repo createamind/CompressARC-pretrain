@@ -240,10 +240,10 @@ class ConnectedComponentsModule(nn.Module):
 
 
 class RelationalReasoningModule(nn.Module):
-    """推理对象之间的空间和属性关系"""
+    # 保持不变但使用输出维度变量...
     def __init__(self, feature_dim=128, output_dim=128):
         super().__init__()
-        self.output_dim = output_dim  # 保存输出维度
+        self.output_dim = output_dim
 
         # 关系编码器
         self.relation_encoder = nn.Sequential(
@@ -304,10 +304,13 @@ class HierarchicalEncoder(nn.Module):
     def __init__(self, grid_size=30, num_categories=10):
         super().__init__()
 
-        # 计算特征图尺寸 - 使用正确的下采样公式
-        # 对于stride=2, padding=1, kernel=3的卷积: output = (input + 2*padding - kernel) // stride + 1
-        first_size = (grid_size + 2*1 - 3) // 2 + 1  # 30 -> 15
-        second_size = (first_size + 2*1 - 3) // 2 + 1  # 15 -> 8
+        # 计算下采样后的特征图尺寸
+        # 下采样1: 30 -> 15 (简单地除以2)
+        # 下采样2: 15 -> 8 (15+2*1-3)//2+1 = 8
+        self.level1_size = grid_size // 2
+        self.level2_size = (self.level1_size + 2*1 - 3) // 2 + 1
+
+        print(f"编码器特征图尺寸: {grid_size} -> {self.level1_size} -> {self.level2_size}")
 
         # 低级特征提取：像素级模式
         self.low_level_encoder = nn.Sequential(
@@ -315,24 +318,24 @@ class HierarchicalEncoder(nn.Module):
             nn.LayerNorm([64, grid_size, grid_size]),
             nn.ReLU(),
             nn.Conv2d(64, 64, 3, stride=2, padding=1),  # 降采样到 15x15
-            nn.LayerNorm([64, first_size, first_size]),
+            nn.LayerNorm([64, self.level1_size, self.level1_size]),
             nn.ReLU(),
         )
 
         # 中级特征提取：局部结构
         self.mid_level_encoder = nn.Sequential(
             nn.Conv2d(64, 128, 3, padding=1),
-            nn.LayerNorm([128, first_size, first_size]),
+            nn.LayerNorm([128, self.level1_size, self.level1_size]),
             nn.ReLU(),
             nn.Conv2d(128, 128, 3, stride=2, padding=1),  # 降采样到 8x8
-            nn.LayerNorm([128, second_size, second_size]),
+            nn.LayerNorm([128, self.level2_size, self.level2_size]),
             nn.ReLU(),
         )
 
         # 高级特征提取：全局概念
         self.high_level_encoder = nn.Sequential(
             nn.Conv2d(128, 256, 3, padding=1),
-            nn.LayerNorm([256, second_size, second_size]),
+            nn.LayerNorm([256, self.level2_size, self.level2_size]),
             nn.ReLU(),
             nn.AdaptiveAvgPool2d((4, 4)),  # 自适应池化到固定大小4x4
             nn.Flatten(),
@@ -340,10 +343,6 @@ class HierarchicalEncoder(nn.Module):
             nn.LayerNorm(512),
             nn.ReLU()
         )
-
-        # 保存尺寸以便解码器使用
-        self.first_size = first_size
-        self.second_size = second_size
 
     def forward(self, x):
         # 提取层次化特征
@@ -357,7 +356,6 @@ class HierarchicalEncoder(nn.Module):
             'high': high_features
         }
 
-
 class HierarchicalDecoder(nn.Module):
     """分层次解码器"""
     def __init__(self, grid_size=30, num_categories=10, pixel_dim=64, object_dim=128, relation_dim=64):
@@ -365,9 +363,25 @@ class HierarchicalDecoder(nn.Module):
         self.grid_size = grid_size
         self.num_categories = num_categories
 
-        # 计算特征图尺寸 - 使用正确的下采样公式
-        first_size = (grid_size + 2*1 - 3) // 2 + 1  # 30 -> 15
-        second_size = (first_size + 2*1 - 3) // 2 + 1  # 15 -> 8
+        # 计算转置卷积输出尺寸 - 使用正确的公式
+        # 转置卷积输出尺寸 = (input_size - 1) * stride + kernel_size - 2*padding
+
+        # 用于自适应池化的固定尺寸
+        self.pool_size = 4
+
+        # 从4x4 -> ~8x8
+        # (4-1)*2 + 4 - 2*1 = 6 + 4 - 2 = 8
+        self.level2_size = (self.pool_size-1)*2 + 4 - 2*1
+
+        # 从8x8 -> ~16x16
+        # (8-1)*2 + 4 - 2*1 = 14 + 4 - 2 = 16
+        self.level1_size = (self.level2_size-1)*2 + 4 - 2*1
+
+        # 从16x16 -> ~32x32
+        # (16-1)*2 + 4 - 2*1 = 30 + 4 - 2 = 32
+        # 但我们希望保持与原始大小一致，所以最后一层会做特殊处理
+
+        print(f"解码器特征图尺寸: 4x4 -> {self.level2_size}x{self.level2_size} -> {self.level1_size}x{self.level1_size} -> {grid_size}x{grid_size}")
 
         # 高级特征处理
         self.high_processor = nn.Sequential(
@@ -379,31 +393,28 @@ class HierarchicalDecoder(nn.Module):
             nn.ReLU()
         )
 
-        # 中级特征解码
+        # 中级特征解码 - 从4x4到8x8
         self.mid_decoder = nn.Sequential(
             nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1),
-            nn.LayerNorm([128, second_size, second_size]),  # 8x8
+            nn.LayerNorm([128, self.level2_size, self.level2_size]),
             nn.ReLU()
         )
 
-        # 低级特征解码
+        # 低级特征解码 - 从8x8到16x16
         self.low_decoder = nn.Sequential(
             nn.ConvTranspose2d(128 + object_dim, 64, 4, stride=2, padding=1),
-            nn.LayerNorm([64, first_size, first_size]),  # 15x15
+            nn.LayerNorm([64, self.level1_size, self.level1_size]),
             nn.ReLU()
         )
 
-        # 最终解码到原始大小
+        # 最终解码 - 从16x16到30x30
+        # 使用自定义的输出填充来获得精确的30x30输出
         self.final_decoder = nn.Sequential(
-            nn.ConvTranspose2d(64 + pixel_dim, 64, 4, stride=2, padding=1),
-            nn.LayerNorm([64, grid_size, grid_size]),
+            nn.ConvTranspose2d(64 + pixel_dim, 64, 4, stride=2, padding=1, output_padding=0),
+            nn.LayerNorm([64, self.level1_size*2-2, self.level1_size*2-2]),
             nn.ReLU(),
             nn.Conv2d(64, num_categories, 3, padding=1)
         )
-
-        # 保存尺寸以便使用
-        self.first_size = first_size
-        self.second_size = second_size
 
     def forward(self, pixel_features, object_features, relation_features, high_features):
         # 处理高级特征与关系特征
@@ -417,12 +428,12 @@ class HierarchicalDecoder(nn.Module):
         # 将对象特征转换为空间图
         batch_size = mid_decoded.shape[0]
         object_map = torch.zeros(batch_size, object_features.shape[-1],
-                                self.second_size, self.second_size,
+                                self.level2_size, self.level2_size,
                                 device=object_features.device)
 
         # 这里简化处理，直接使用全局对象特征
         for b in range(batch_size):
-            object_map[b] = object_features[b].unsqueeze(-1).unsqueeze(-1).expand(-1, self.second_size, self.second_size).mean(0, keepdim=True)
+            object_map[b] = object_features[b].unsqueeze(-1).unsqueeze(-1).expand(-1, self.level2_size, self.level2_size).mean(0, keepdim=True)
 
         # 合并中级特征和对象特征
         mid_with_objects = torch.cat([mid_decoded, object_map], dim=1)
@@ -430,19 +441,31 @@ class HierarchicalDecoder(nn.Module):
         # 解码低级特征
         low_decoded = self.low_decoder(mid_with_objects)
 
-        # 将像素特征上采样
-        pixel_upsampled = F.interpolate(pixel_features, size=(self.first_size, self.first_size), mode='bilinear', align_corners=False)
+        # 将像素特征上采样到与low_decoded相同大小
+        pixel_upsampled = F.interpolate(pixel_features,
+                                       size=(self.level1_size, self.level1_size),
+                                       mode='bilinear',
+                                       align_corners=False)
 
         # 合并低级特征和像素特征
         low_with_pixels = torch.cat([low_decoded, pixel_upsampled], dim=1)
 
         # 最终解码
-        output = self.final_decoder(low_with_pixels)
+        output_raw = self.final_decoder(low_with_pixels)
+
+        # 裁剪或填充到目标大小 30x30
+        current_h, current_w = output_raw.shape[2], output_raw.shape[3]
+        if current_h > self.grid_size or current_w > self.grid_size:
+            output = output_raw[:, :, :self.grid_size, :self.grid_size]
+        else:
+            # 如果尺寸太小，使用填充
+            output = F.pad(output_raw, (0, self.grid_size - current_w, 0, self.grid_size - current_h))
 
         # 调整输出形状为批次、网格单元、类别
         output = output.permute(0, 2, 3, 1).reshape(batch_size, -1, self.num_categories)
 
         return output
+
 
 
 class ObjectOrientedHierarchicalVAE(nn.Module):
@@ -457,14 +480,9 @@ class ObjectOrientedHierarchicalVAE(nn.Module):
         self.object_dim = object_dim
         self.relation_dim = relation_dim
 
-        # 计算特征图尺寸
-        first_size = (grid_size + 2*1 - 3) // 2 + 1  # 30 -> 15
-        second_size = (first_size + 2*1 - 3) // 2 + 1  # 15 -> 8
-        self.first_size = first_size
-        self.second_size = second_size
-
         # 分层编码器
         self.hierarchical_encoder = HierarchicalEncoder(grid_size, num_categories)
+        self.level1_size = self.hierarchical_encoder.level1_size  # 15
 
         # 对象连通性提取模块
         self.connectivity_module = ConnectedComponentsModule(
@@ -474,7 +492,7 @@ class ObjectOrientedHierarchicalVAE(nn.Module):
         )
 
         # 关系推理模块
-        self.relation_module = RelationalReasoningModule(feature_dim=object_dim, output_dim=relation_dim)
+        self.relation_module = RelationalReasoningModule(feature_dim=128, output_dim=relation_dim)
 
         # 分离的潜在空间
         self.pixel_vq = VectorQuantizer(num_embeddings=pixel_codebook_size, embedding_dim=pixel_dim)
@@ -484,7 +502,7 @@ class ObjectOrientedHierarchicalVAE(nn.Module):
         # 潜在空间投影
         self.pixel_projector = nn.Sequential(
             nn.Conv2d(64, pixel_dim, 1),
-            nn.LayerNorm([pixel_dim, first_size, first_size]),
+            nn.LayerNorm([pixel_dim, self.level1_size, self.level1_size]),
             nn.ReLU()
         )
 
@@ -519,7 +537,6 @@ class ObjectOrientedHierarchicalVAE(nn.Module):
             if obj_feat.shape[0] > 1:  # 有多个对象
                 proj_feats = self.object_projector(obj_feat)
             else:  # 单个对象或零对象的情况
-                # 修复：使用self.object_dim代替self.object_projector[-2].out_features
                 proj_feats = torch.zeros(1, self.object_dim, device=x.device)
             processed_obj_features.append(proj_feats.mean(0))  # 平均所有对象特征
 
@@ -528,7 +545,7 @@ class ObjectOrientedHierarchicalVAE(nn.Module):
         # 3. 提取关系特征
         relation_features = self.relation_module(object_features)
 
-        # 4. 项目到适合量化的空间
+        # 4. 投影到适合量化的空间
         pixel_proj = self.pixel_projector(features['low'])
 
         # 5. 应用向量量化
@@ -550,3 +567,7 @@ class ObjectOrientedHierarchicalVAE(nn.Module):
 
         # 返回重建结果和VQ损失
         return reconstruction, None, None, None, total_vq_loss, None
+
+
+
+
