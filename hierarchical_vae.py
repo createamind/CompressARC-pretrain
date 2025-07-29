@@ -327,6 +327,29 @@ class VectorQuantizer(nn.Module):
             normalized = updated_weights / norm.clamp(min=1e-5)
             self.embedding.weight.data = normalized * math.sqrt(self.embedding_dim)
 
+    # 在VectorQuantizer类中添加此方法
+    def get_codebook_indices(self, inputs):
+        """返回最近编码的索引，用于监控编码本使用情况"""
+        # 与forward相同的前处理
+        input_shape = inputs.shape
+
+        # 扁平化空间维度以用于计算
+        if len(input_shape) == 4:
+            flat_input = inputs.permute(0, 2, 3, 1).contiguous()
+            flat_input = flat_input.view(-1, self.embedding_dim)
+        elif len(input_shape) == 3:
+            flat_input = inputs.reshape(-1, self.embedding_dim)
+        else:
+            flat_input = inputs
+
+        # 计算距离并找到最近的编码
+        distances = torch.sum(flat_input**2, dim=1, keepdim=True) + \
+                    torch.sum(self.embedding.weight**2, dim=1) - \
+                    2 * torch.matmul(flat_input, self.embedding.weight.t())
+
+        # 返回最近的编码索引
+        return torch.argmin(distances, dim=1)
+
 
 # [ConnectedComponentsModule和RelationalReasoningModule类保持不变]
 

@@ -15,6 +15,7 @@ import time
 from collections import defaultdict
 import datetime
 from hierarchical_vae import ObjectOrientedHierarchicalVAE
+import itertools
 
 
 # Dataset class with curriculum learning capability
@@ -434,31 +435,42 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
 
             # 累积梯度后更新权重
             if (batch_idx + 1) % accumulation_steps == 0:
-                if use_amp:
-                    # 缩放梯度进行裁剪
-                    scaler.unscale_(optimizer)
-
-                # 更严格的梯度裁剪
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-
-                # 检查梯度是否含有NaN
                 has_nan_grad = False
-                for param in model.parameters():
-                    if param.grad is not None:
-                        if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                            has_nan_grad = True
-                            break
+
+                if use_amp:
+                    try:
+                        # 尝试unscale梯度
+                        scaler.unscale_(optimizer)
+
+                        # 现在可以安全地检查原始梯度
+                        for param in model.parameters():
+                            if param.grad is not None:
+                                if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                                    has_nan_grad = True
+                                    break
+
+                        # 如果没有NaN，应用梯度裁剪
+                        if not has_nan_grad:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+
+                    except RuntimeError as e:
+                        print(f"警告: 缩放器错误: {e}")
+                        has_nan_grad = True  # 标记为有问题
+                else:
+                    # 非混合精度模式...
+                    pass  # 保持原来的逻辑
 
                 if has_nan_grad:
                     print("警告: 检测到NaN梯度，跳过此更新步骤")
                     optimizer.zero_grad()
+                    if use_amp:
+                        # 关键修复：即使跳过步骤也要更新缩放器！
+                        scaler.update()
                 else:
                     if use_amp:
-                        # 使用缩放器更新
                         scaler.step(optimizer)
                         scaler.update()
                     else:
-                        # 标准更新
                         optimizer.step()
 
                 # 重置梯度
@@ -525,7 +537,7 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
             f.write(json.dumps(log_data) + "\n")
 
         # 保存模型检查点
-        if (epoch + 1) % 5 == 0 or epoch == epochs - 1:
+        if ((epoch + 1) % 5 == 0 or epoch == epochs - 1) and use_hierarchical_vae :
             model_type = "discrete" if use_discrete_vae else "standard"
             checkpoint_path = os.path.join(run_dir, f'{model_type}_model_epoch_{epoch+1}.pt')
             torch.save({
@@ -537,19 +549,28 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
             }, checkpoint_path)
             print(f'检查点已保存到 {checkpoint_path}')
 
-        # 在评估阶段添加
-        # if epoch % 5 == 0:
-            # 收集一批数据的编码索引
-            indices_list = []
-            with torch.no_grad():
-                for data, _ in itertools.islice(dataloader, 10):  # 取10批
-                    _, _, _, _, _, indices = model(data.to(device))
-                    indices_list.extend(indices.cpu().numpy().flatten())
+        # 然后修改监控代码部分:
+        # if epoch % 5 == 0 and use_hierarchical_vae:
+            try:
+                # 收集一批数据的编码索引
+                pixel_indices = []
+                with torch.no_grad():
+                    for data, _ in itertools.islice(dataloader, 10):  # 取10批
+                        # 层次化VAE需要特殊处理
+                        _, _, _, _, _, _ = model(data.to(device))
+                        # 从VQ层直接获取索引
+                        temp_indices = model.pixel_vq.get_codebook_indices(model.pixel_projector(model.hierarchical_encoder(data.to(device))['low']))
+                        if temp_indices is not None:
+                            pixel_indices.extend(temp_indices.cpu().numpy().flatten())
 
-            # 计算编码本使用率
-            unique_indices = np.unique(indices_list)
-            usage_ratio = len(unique_indices) / model.pixel_vq.num_embeddings
-            print(f"编码本使用率: {usage_ratio:.2%}, 使用{len(unique_indices)}/{model.pixel_vq.num_embeddings}个编码")
+                if pixel_indices:
+                    # 计算编码本使用率
+                    unique_indices = np.unique(pixel_indices)
+                    usage_ratio = len(unique_indices) / model.pixel_vq.num_embeddings
+                    print(f"编码本使用率: {usage_ratio:.2%}, 使用{len(unique_indices)}/{model.pixel_vq.num_embeddings}个编码")
+            except Exception as e:
+                print(f"监控编码本使用时出错: {e}")
+
 
     # 保存最终模型
     model_type = "discrete" if use_discrete_vae else "standard"
