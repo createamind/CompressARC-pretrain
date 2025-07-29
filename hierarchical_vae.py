@@ -505,10 +505,17 @@ class ObjectOrientedHierarchicalVAE(nn.Module):
         self.relation_module = RelationalReasoningModule(feature_dim=128, output_dim=relation_dim)
 
         # 分离的潜在空间 - 使用更小的commitment_cost增加稳定性
+        # self.pixel_vq = VectorQuantizer(
+        #     num_embeddings=pixel_codebook_size,
+        #     embedding_dim=pixel_dim,
+        #     commitment_cost=0.1
+        # )
+        # 在hierarchical_vae.py中
         self.pixel_vq = VectorQuantizer(
             num_embeddings=pixel_codebook_size,
             embedding_dim=pixel_dim,
-            commitment_cost=0.1
+            commitment_cost=0.1,
+            decay=0.95  # 降低从0.99到0.95，增加编码本更新速度
         )
         self.object_vq = VectorQuantizer(
             num_embeddings=object_codebook_size,

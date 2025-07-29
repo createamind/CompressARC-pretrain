@@ -307,7 +307,13 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=5e-4)
 
     # 调整学习率策略
-    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=3, T_mult=2, eta_min=5e-5)
+    # scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=3, T_mult=2, eta_min=5e-5)
+    scheduler = CosineAnnealingWarmRestarts(
+        optimizer,
+        T_0=10,  # 从3增加到10
+        T_mult=1,  # 从2减少到1，保持周期稳定
+        eta_min=1e-4  # 从5e-5增加到1e-4，提高最小学习率
+    )
 
     # 只有在GPU上才使用混合精度训练
     use_amp = use_amp and has_gpu
@@ -530,6 +536,20 @@ def train_model(data_path, save_dir, epochs=100, batch_size=32, learning_rate=1e
                 'loss': avg_loss
             }, checkpoint_path)
             print(f'检查点已保存到 {checkpoint_path}')
+
+        # 在评估阶段添加
+        # if epoch % 5 == 0:
+            # 收集一批数据的编码索引
+            indices_list = []
+            with torch.no_grad():
+                for data, _ in itertools.islice(dataloader, 10):  # 取10批
+                    _, _, _, _, _, indices = model(data.to(device))
+                    indices_list.extend(indices.cpu().numpy().flatten())
+
+            # 计算编码本使用率
+            unique_indices = np.unique(indices_list)
+            usage_ratio = len(unique_indices) / model.pixel_vq.num_embeddings
+            print(f"编码本使用率: {usage_ratio:.2%}, 使用{len(unique_indices)}/{model.pixel_vq.num_embeddings}个编码")
 
     # 保存最终模型
     model_type = "discrete" if use_discrete_vae else "standard"
