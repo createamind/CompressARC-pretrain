@@ -322,6 +322,7 @@ class RuleGuidedVAE(nn.Module):
             'vq_loss': total_vq_loss
         }
 
+
     def apply_rule(self, input_grid, rule):
         """第三阶段：应用规则到输入以生成预测输出"""
         # 抽象输入
@@ -329,13 +330,15 @@ class RuleGuidedVAE(nn.Module):
 
         # 提取各层次特征
         batch_size = input_grid.size(0)
+        device = input_grid.device
 
         # 应用规则转换
         transformed_objects_list = []
+        transformed_pixels_list = []
         for b in range(batch_size):
             # 对每个批次应用规则
             batch_objects = input_abstract['object_features'][b]
-            batch_rule = rule['rule_embedding'][b:b+1]  # 获取相应批次的规则
+            batch_rule = rule['rule_embedding'][b:b+1]
 
             transformed_objects, transformed_pixels = self.rule_applier(
                 batch_objects,
@@ -344,46 +347,40 @@ class RuleGuidedVAE(nn.Module):
                 rule['operations'] if 'operations' in rule else None
             )
             transformed_objects_list.append(transformed_objects)
+            transformed_pixels_list.append(transformed_pixels)
 
-        # 组合转换后的对象
+        # 处理批量输出
         output_batch = []
         for b in range(batch_size):
-            # 计算组合后的场景
-            composed_scene = self.object_composer(
-                transformed_objects_list[b],
-                transformed_pixels[b:b+1]
-            )
+            # 关键修复：将对象列表转换为解码器需要的张量格式
+            # HierarchicalDecoder期望形状为[batch_size=1, num_features]的张量
 
-            # 解码生成最终输出
-            # 注意：不要使用unsqueeze(0)，直接传递对象列表
-
-            if isinstance(composed_scene['object_features'], list):
-            # 如果是对象列表，创建一个虚拟批次
-                if len(composed_scene['object_features']) > 0:
-                    # 有对象时，合并为张量
-                    obj_features = torch.cat(composed_scene['object_features'], dim=0).unsqueeze(0)
-                else:
-                    # 无对象时，创建空张量
-                    obj_features = torch.zeros(1, 0, 128, device=device)
+            # 检查是否有对象
+            if transformed_objects_list[b] and len(transformed_objects_list[b]) > 0:
+                # 将所有对象特征平均合并为一个特征向量
+                object_tensor = torch.stack([
+                    obj.mean(0) if obj.dim() > 1 else obj
+                    for obj in transformed_objects_list[b]
+                ]).mean(0, keepdim=True)  # [1, feature_dim]
             else:
-                # 已经是张量格式
-                obj_features = composed_scene['object_features']
+                # 如果没有对象，创建全零张量
+                object_tensor = torch.zeros(1, self.object_dim, device=device)
 
+            # 调用解码器
             output = self.decoder(
-                composed_scene['pixel_features'],
-                obj_features,  # 使用适配后的对象特征
-            # output = self.decoder(
-            #     composed_scene['pixel_features'],
-            #     composed_scene['object_features'],  # 直接传递对象列表
-                input_abstract['relation_features'][b:b+1],
-                input_abstract['high_features'][b:b+1]
+                transformed_pixels_list[b],    # [1, channels, H, W]
+                object_tensor,                # [1, feature_dim]
+                input_abstract['relation_features'][b:b+1],  # [1, relation_dim]
+                input_abstract['high_features'][b:b+1]       # [1, high_dim]
             )
             output_batch.append(output)
 
         # 合并批次结果
         final_output = torch.cat(output_batch, dim=0)
-
         return final_output
+
+
+
 
     def evaluate_rule(self, predicted_output, ground_truth):
         """第四阶段：评估规则应用结果与目标的一致性"""
