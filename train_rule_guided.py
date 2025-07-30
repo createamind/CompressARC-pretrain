@@ -1,3 +1,4 @@
+import math
 import os
 import json
 import torch
@@ -52,65 +53,83 @@ def check_gpu():
     return True, device, device_id
 
 
-# def plot_results(task_id, input_grid, output_grid, predicted_grid, save_path):
+
 def plot_results(task_id, input_grid, output_grid, predicted_grid, save_path):
-    """修复后的结果可视化函数，能够处理各种形状的输入"""
+    """修复后的结果可视化函数，处理不同格式的预测输出"""
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
-    # 转换one-hot为颜色网格
+    # 转换input和output的one-hot为颜色网格
     input_colors = torch.argmax(input_grid, dim=0).cpu().numpy()
     output_colors = torch.argmax(output_grid, dim=0).cpu().numpy()
-    pred_colors = torch.argmax(predicted_grid, dim=0).cpu().numpy()
 
-    # 调试信息
-    print(f"形状信息: input={input_colors.shape}, output={output_colors.shape}, pred={pred_colors.shape}")
-
-    # 只显示非零部分 - 修复np.where处理
-    # 输入网格
-    nonzero = np.where(input_colors > 0)
-    if len(nonzero) == 2 and len(nonzero[0]) > 0:
-        input_h, input_w = nonzero
-        max_h, max_w = max(input_h) + 1, max(input_w) + 1
-        input_colors = input_colors[:max_h, :max_w]
-    else:
-        print(f"输入网格没有非零值或维度错误: shape={input_colors.shape}")
-        input_colors = input_colors[:5, :5]  # 使用小区域
-
-    # 输出网格
-    nonzero = np.where(output_colors > 0)
-    if len(nonzero) == 2 and len(nonzero[0]) > 0:
-        output_h, output_w = nonzero
-        max_h, max_w = max(output_h) + 1, max(output_w) + 1
-        output_colors = output_colors[:max_h, :max_w]
-    else:
-        print(f"输出网格没有非零值或维度错误: shape={output_colors.shape}")
-        output_colors = output_colors[:5, :5]
-
-    # 预测网格 - 这里是问题所在
-    nonzero = np.where(pred_colors > 0)
-    if len(nonzero) == 2 and len(nonzero[0]) > 0:
-        pred_h, pred_w = nonzero
-        max_h, max_w = max(pred_h) + 1, max(pred_w) + 1
-        pred_colors = pred_colors[:max_h, :max_w]
-    else:
-        print(f"预测网格没有非零值或维度错误: shape={pred_colors.shape}, nonzero={nonzero}")
-        # 如果pred_colors是1D数组，尝试重塑它
-        if pred_colors.ndim == 1:
-            size = int(np.sqrt(pred_colors.size))
-            pred_colors = pred_colors[:size*size].reshape(size, size)
+    # 处理predicted_grid的不同格式
+    if predicted_grid.ndim == 1:
+        # 如果是1D数组 (10,)，它可能是单个网格单元的类别概率
+        print(f"预测是1D数组: {predicted_grid.shape}")
+        # 创建一个空的1x1网格并设置唯一单元格的颜色
+        pred_colors = np.zeros((1, 1), dtype=np.int32)
+        pred_colors[0, 0] = torch.argmax(predicted_grid).item()
+    elif predicted_grid.ndim == 2:
+        # 如果是2D数组，可能是 (grid_cells=900, num_categories=10)
+        # 或者已经是 (30, 30) 的索引数组
+        if predicted_grid.shape[1] == 10:  # 格式: (grid_cells, num_categories)
+            print(f"预测是扁平化的类别分布: {predicted_grid.shape}")
+            pred_colors = torch.argmax(predicted_grid, dim=1).cpu().numpy()
+            # 重塑为30x30网格
+            grid_size = int(np.sqrt(pred_colors.shape[0]))
+            pred_colors = pred_colors.reshape(grid_size, grid_size)
         else:
-            pred_colors = pred_colors[:5, :5]  # 使用小区域
+            # 已经是颜色索引数组
+            print(f"预测已经是索引数组: {predicted_grid.shape}")
+            pred_colors = predicted_grid.cpu().numpy()
+    elif predicted_grid.ndim == 3:
+        # 如果是3D数组，可能是 (batch=1, grid_cells=900, num_categories=10)
+        # 或者是 (num_categories=10, height=30, width=30)
+        if predicted_grid.shape[0] == 10:  # one-hot格式 (C, H, W)
+            print(f"预测是one-hot格式: {predicted_grid.shape}")
+            pred_colors = torch.argmax(predicted_grid, dim=0).cpu().numpy()
+        else:
+            # 批次格式 (B, grid_cells, C)
+            print(f"预测是批次格式: {predicted_grid.shape}")
+            pred_probs = predicted_grid[0]  # 取第一个批次样本
+            pred_colors = torch.argmax(pred_probs, dim=1).cpu().numpy()
+            # 重塑为网格
+            grid_size = int(np.sqrt(pred_colors.shape[0]))
+            pred_colors = pred_colors.reshape(grid_size, grid_size)
+    else:
+        print(f"无法识别的预测格式: {predicted_grid.shape}")
+        pred_colors = np.zeros((5, 5), dtype=np.int32)
+
+    print(f"处理后的形状: input={input_colors.shape}, output={output_colors.shape}, pred={pred_colors.shape}")
+
+    # 裁剪网格以显示实际内容
+    def crop_grid(grid):
+        nonzero = np.where(grid > 0)
+        if len(nonzero) == 2 and len(nonzero[0]) > 0:
+            min_h, min_w = np.min(nonzero[0]), np.min(nonzero[1])
+            max_h, max_w = np.max(nonzero[0]), np.max(nonzero[1])
+            # 添加小边距
+            min_h = max(0, min_h - 1)
+            min_w = max(0, min_w - 1)
+            max_h = min(grid.shape[0] - 1, max_h + 1)
+            max_w = min(grid.shape[1] - 1, max_w + 1)
+            return grid[min_h:max_h+1, min_w:max_w+1]
+        return grid[:5, :5]  # 默认显示左上角5x5区域
+
+    input_display = crop_grid(input_colors)
+    output_display = crop_grid(output_colors)
+    pred_display = crop_grid(pred_colors)
 
     # 绘制网格
-    axes[0].imshow(input_colors, vmin=0, vmax=9)
+    axes[0].imshow(input_display, vmin=0, vmax=9)
     axes[0].set_title('Input')
     axes[0].grid(True, color='black', linewidth=0.5)
 
-    axes[1].imshow(output_colors, vmin=0, vmax=9)
+    axes[1].imshow(output_display, vmin=0, vmax=9)
     axes[1].set_title('Expected Output')
     axes[1].grid(True, color='black', linewidth=0.5)
 
-    axes[2].imshow(pred_colors, vmin=0, vmax=9)
+    axes[2].imshow(pred_display, vmin=0, vmax=9)
     axes[2].set_title('Predicted Output')
     axes[2].grid(True, color='black', linewidth=0.5)
 
@@ -118,6 +137,8 @@ def plot_results(task_id, input_grid, output_grid, predicted_grid, save_path):
     plt.tight_layout()
     plt.savefig(save_path)
     plt.close()
+
+
 
 
 def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
@@ -329,9 +350,19 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
                         results_dir,
                         f'epoch_{epoch+1}_task_{task_id.replace(".json", "")}.png'
                     )
+                    # with torch.no_grad():
+                    #     plot_results(task_id, train_input[0], test_output[0],
+                    #                 F.softmax(predicted_output[0], dim=0), save_path)
+                    # 在train_rule_guided.py的可视化部分
                     with torch.no_grad():
-                        plot_results(task_id, train_input[0], test_output[0],
-                                    F.softmax(predicted_output[0], dim=0), save_path)
+                        # 修改：正确处理解码器输出格式
+                        pred_output = F.softmax(predicted_output[0], dim=1)  # [grid_cells, num_categories]
+
+                        # 将输出重塑为网格
+                        grid_size = int(math.sqrt(pred_output.size(0)))
+                        reshaped_pred = pred_output.view(grid_size, grid_size, -1).permute(2, 0, 1)  # [C, H, W]
+
+                        plot_results(task_id, train_input[0], test_output[0], reshaped_pred, save_path)
 
         # 更新学习率
         scheduler.step()
