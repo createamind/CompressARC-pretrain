@@ -448,7 +448,7 @@ if __name__ == "__main__":
                         help="Directory to save model checkpoints")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=4, help="Number of tasks per batch")
-    parser.add_argument("--lr", type=float, default=0.0005, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=0.005, help="Learning rate")
     parser.add_argument("--rule_weight", type=float, default=1.0, help="Weight for rule loss")
     parser.add_argument("--recon_weight", type=float, default=5.0, help="Weight for reconstruction loss")
     parser.add_argument("--vq_weight", type=float, default=0.1, help="Weight for VQ loss")
