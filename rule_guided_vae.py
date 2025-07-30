@@ -162,6 +162,7 @@ class RuleEvaluator(nn.Module):
         score = self.evaluator(combined)
         return score
 
+from enhanced_inference import ExplicitRuleInference
 
 class RuleGuidedVAE(nn.Module):
     """整合了规则提取与应用的层次化VAE模型"""
@@ -169,6 +170,9 @@ class RuleGuidedVAE(nn.Module):
                  pixel_codebook_size=512, object_codebook_size=256, rule_codebook_size=128,
                  pixel_dim=64, object_dim=128, relation_dim=64, rule_dim=128):
         super().__init__()
+
+        self.explicit_inference = ExplicitRuleInference(self.operation_library, rule_dim=128)
+
 
         # 1. 抽象阶段组件
         self.encoder = HierarchicalEncoder(grid_size, num_categories)

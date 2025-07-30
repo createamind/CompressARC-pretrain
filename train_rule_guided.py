@@ -139,7 +139,26 @@ def plot_results(task_id, input_grid, output_grid, predicted_grid, save_path):
     plt.close()
 
 
+def enhance_model_stability(model, clip_value=0.1):
+    """增强模型训练稳定性的各种技巧"""
+    # 1. 使用较小的梯度裁剪阈值
+    original_clip_value = 0.5
+    print(f"增强稳定性: 梯度裁剪阈值从 {original_clip_value} 降低到 {clip_value}")
 
+    # 2. 为所有BatchNorm和LayerNorm层添加eps
+    for module in model.modules():
+        if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d,
+                              nn.LayerNorm, nn.GroupNorm)):
+            module.eps = 1e-5
+
+    # 3. 为VQ模块设置更保守的commitment_cost
+    for name, module in model.named_modules():
+        if isinstance(module, VectorQuantizer):
+            old_cost = module.commitment_cost
+            module.commitment_cost = 0.1  # 降低commitment_cost值
+            print(f"增强稳定性: VQ模块 {name} 的commitment_cost从 {old_cost} 调整为 {module.commitment_cost}")
+
+    return clip_value  # 返回新的裁剪阈值
 
 def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
                          learning_rate=1e-3, rule_weight=1.0, recon_weight=5.0,
@@ -283,7 +302,12 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
                                         break
 
                             if not has_nan_grad:
-                                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+                                clip_value = enhance_model_stability(model)
+
+                                # 在反向传播处使用新的裁剪阈值
+                                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_value)
+
+                                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
                         except RuntimeError as e:
                             print(f"警告: 缩放器错误: {e}")
                             has_nan_grad = True
@@ -334,7 +358,11 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
                     if has_nan_grad:
                         print(f"警告: 任务 {task_id} 检测到NaN梯度，跳过更新")
                     else:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+                        clip_value = enhance_model_stability(model)
+
+                        # 在反向传播处使用新的裁剪阈值
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_value)
+                        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
                         optimizer.step()
 
                 # 记录损失
@@ -351,7 +379,7 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
                         f'epoch_{epoch+1}_task_{task_id.replace(".json", "")}.png'
                     )
                     # with torch.no_grad():
-                    #     plot_results(task_id, train_input[0], test_output[0],
+                    #     plot_results(task_id, test_input[0], test_output[0],
                     #                 F.softmax(predicted_output[0], dim=0), save_path)
                     # 在train_rule_guided.py的可视化部分
                     with torch.no_grad():
@@ -362,7 +390,7 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
                         grid_size = int(math.sqrt(pred_output.size(0)))
                         reshaped_pred = pred_output.view(grid_size, grid_size, -1).permute(2, 0, 1)  # [C, H, W]
 
-                        plot_results(task_id, train_input[0], test_output[0], reshaped_pred, save_path)
+                        plot_results(task_id, test_input[0], test_output[0], reshaped_pred, save_path)
 
         # 更新学习率
         scheduler.step()
