@@ -110,8 +110,11 @@ class ObjectComposer(nn.Module):
             nn.ReLU()
         )
 
-    def forward(self, objects, pixel_features, grid_size=None):  # 使grid_size成为可选参数
+    def forward(self, objects, pixel_features, grid_size=None):
         """组合对象和像素特征"""
+        # 添加调试信息
+        print(f"像素特征尺寸: {pixel_features.shape}")
+
         # 创建对象特征图 - 使用pixel_features的实际尺寸
         batch_size, _, height, width = pixel_features.shape
 
@@ -122,13 +125,20 @@ class ObjectComposer(nn.Module):
             obj_mean = torch.cat(objects, dim=0).mean(dim=0, keepdim=True)
             object_map[:] = obj_mean.view(1, 128, 1, 1).expand(-1, -1, height, width)
 
+            # 添加优雅降级机制，确保尺寸匹配
+            if pixel_features.shape[-1] != object_map.shape[-1]:
+                print(f"调整对象图尺寸: {object_map.shape} -> ({pixel_features.shape[-2]}, {pixel_features.shape[-1]})")
+                object_map = F.interpolate(object_map, size=(pixel_features.shape[-2], pixel_features.shape[-1]))
+
         # 组合像素和对象特征
         combined = torch.cat([pixel_features, object_map], dim=1)
         composed_pixels = self.composition_network(combined)
 
+        print(f"转换后的像素特征尺寸: {composed_pixels.shape}")
+
         return {
             'pixel_features': composed_pixels,
-            'object_features': torch.cat(objects, dim=0) if objects else torch.zeros(1, 128, device=pixel_features.device)
+            'object_features': objects  # 返回原始对象列表，不进行合并
         }
 
 
@@ -339,16 +349,32 @@ class RuleGuidedVAE(nn.Module):
         output_batch = []
         for b in range(batch_size):
             # 计算组合后的场景
-
             composed_scene = self.object_composer(
                 transformed_objects_list[b],
-                transformed_pixels[b:b+1]  # 不再传递grid_size参数
+                transformed_pixels[b:b+1]
             )
 
             # 解码生成最终输出
+            # 注意：不要使用unsqueeze(0)，直接传递对象列表
+
+            if isinstance(composed_scene['object_features'], list):
+            # 如果是对象列表，创建一个虚拟批次
+                if len(composed_scene['object_features']) > 0:
+                    # 有对象时，合并为张量
+                    obj_features = torch.cat(composed_scene['object_features'], dim=0).unsqueeze(0)
+                else:
+                    # 无对象时，创建空张量
+                    obj_features = torch.zeros(1, 0, 128, device=device)
+            else:
+                # 已经是张量格式
+                obj_features = composed_scene['object_features']
+
             output = self.decoder(
                 composed_scene['pixel_features'],
-                composed_scene['object_features'].unsqueeze(0),
+                obj_features,  # 使用适配后的对象特征
+            # output = self.decoder(
+            #     composed_scene['pixel_features'],
+            #     composed_scene['object_features'],  # 直接传递对象列表
                 input_abstract['relation_features'][b:b+1],
                 input_abstract['high_features'][b:b+1]
             )
