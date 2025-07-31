@@ -131,26 +131,49 @@ def robust_plot_results(task_id, input_grid, output_grid, predicted_grid, save_p
 
 
 
-def enhance_model_stability(model, clip_value=0.1):
-    """增强模型训练稳定性的各种技巧"""
-    # 1. 使用较小的梯度裁剪阈值
-    original_clip_value = 0.5
-    # print(f"增强稳定性: 梯度裁剪阈值从 {original_clip_value} 降低到 {clip_value}")
+def enhance_model_stability(model):
+    """应用稳定性增强措施"""
 
-    # 2. 为所有BatchNorm和LayerNorm层添加eps
-    for module in model.modules():
-        if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d,
-                              nn.LayerNorm, nn.GroupNorm)):
-            module.eps = 1e-5
+    # 检查模型是否已应用稳定性修复
+    if not hasattr(model, '_stability_enhanced'):
+        print("应用模型稳定性增强...")
 
-    # 3. 为VQ模块设置更保守的commitment_cost
-    for name, module in model.named_modules():
-        if isinstance(module, VectorQuantizer):
-            old_cost = module.commitment_cost
-            module.commitment_cost = 0.1  # 降低commitment_cost值
-            # print(f"增强稳定性: VQ模块 {name} 的commitment_cost从 {old_cost} 调整为 {module.commitment_cost}")
+        # 1. 将解码器中的 LeakyReLU 替换为 ReLU
+        for name, module in model.named_modules():
+            if isinstance(module, nn.LeakyReLU) and 'decoder' in name:
+                # 获取父模块和位置
+                path = name.split('.')
+                parent = model
+                for part in path[:-1]:
+                    parent = getattr(parent, part)
 
-    return clip_value  # 返回新的裁剪阈值
+                # 替换激活函数
+                setattr(parent, path[-1], nn.ReLU())
+
+        # 2. 增加 GroupNorm 的 eps 值
+        for name, module in model.named_modules():
+            if isinstance(module, nn.GroupNorm):
+                module.eps = 1e-5
+
+        # 3. 对最终层应用特殊初始化
+        if hasattr(model, 'decoder') and hasattr(model.decoder, 'final_decoder'):
+            final_layer = None
+            for module in model.decoder.final_decoder:
+                if isinstance(module, nn.Conv2d):
+                    final_layer = module
+
+            if final_layer:
+                with torch.no_grad():
+                    nn.init.xavier_uniform_(final_layer.weight, gain=0.5)
+                    nn.init.zeros_(final_layer.bias)
+
+        # 标记模型已增强
+        model._stability_enhanced = True
+        # 初始使用小的裁剪值
+        return 0.25
+    else:
+        # 已增强模型使用常规裁剪值
+        return 0.5
 
 
 from nan_gradient_debugger import NaNGradientDebugger
@@ -158,7 +181,7 @@ from nan_gradient_debugger import NaNGradientDebugger
 def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
                          learning_rate=1e-3, rule_weight=1.0, recon_weight=5.0,
                          vq_weight=0.1, gpu_id=None):
-    """训练规则引导VAE模型"""
+    """训练规则引导VAE模型 - 简化并增强稳定性的版本"""
     # 创建以时间戳命名的子目录
     current_time = datetime.datetime.now()
     timestamp = current_time.strftime("%Y%m%d_%H%M%S")
@@ -218,6 +241,9 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
     )
     model.to(device)
 
+    # 应用模型稳定性增强
+    clip_value = enhance_model_stability(model)
+
     # 初始化NaN梯度调试器
     debugger = NaNGradientDebugger(model, log_dir=os.path.join(run_dir, "nan_debug"))
     debugger.register_hooks()
@@ -226,10 +252,6 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
     # 优化器和学习率调度器
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=5e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-4)
-
-    # 混合精度训练
-    use_amp = has_gpu
-    scaler = GradScaler() if use_amp else None
 
     print(f"训练设备: {device}")
     if has_gpu:
@@ -241,10 +263,8 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
     print(f"结果将保存到: {run_dir}")
 
     # NaN梯度追踪变量
-    nan_count = 0
-    nan_threshold = 5
     consecutive_nan = 0
-    clip_value = 0.5  # 初始裁剪值
+    nan_threshold = 5
 
     # 训练循环
     for epoch in range(epochs):
@@ -274,124 +294,59 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
                 test_input = test_input.unsqueeze(0)
                 test_output = test_output.unsqueeze(0)
 
-                # 使用混合精度训练
-                if use_amp:
-                    with autocast(device_type=device.type):
-                        # 1. 提取规则
-                        rule = model.extract_rule(train_input, train_output)
+                # 1. 提取规则
+                rule = model.extract_rule(train_input, train_output)
 
-                        # 2. 应用规则到测试输入
-                        predicted_output = model.apply_rule(test_input, rule)
+                # 2. 应用规则到测试输入
+                predicted_output = model.apply_rule(test_input, rule)
 
-                        # 3. 计算重构损失
-                        recon_loss = F.cross_entropy(
-                            predicted_output.reshape(-1, model.num_categories),
-                            torch.argmax(test_output, dim=1).reshape(-1)
-                        )
+                # 3. 计算重构损失 - 使用稳定版本
+                recon_loss = stable_cross_entropy(
+                    predicted_output.reshape(-1, model.num_categories),
+                    torch.argmax(test_output, dim=1).reshape(-1),
+                    epsilon=1e-7
+                )
 
-                        # 4. 计算VQ损失
-                        vq_loss = rule['vq_loss']
+                # 4. 计算VQ损失
+                vq_loss = rule['vq_loss']
 
-                        # 5. 总损失
-                        total_loss = recon_weight * recon_loss + vq_weight * vq_loss
+                # 5. 总损失
+                total_loss = recon_weight * recon_loss + vq_weight * vq_loss
 
-                    # 反向传播
-                    optimizer.zero_grad()
-                    scaler.scale(total_loss).backward()
+                # 反向传播
+                optimizer.zero_grad()
+                total_loss.backward()
 
-                    # 检查梯度
-                    has_nan_grad = False
-                    if use_amp:
-                        try:
-                            scaler.unscale_(optimizer)
-
-                            for param in model.parameters():
-                                if param.grad is not None:
-                                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                                        has_nan_grad = True
-                                        break
-
-                            if not has_nan_grad:
-                                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_value)
-                        except RuntimeError as e:
-                            print(f"警告: 缩放器错误: {e}")
+                # 检查梯度
+                has_nan_grad = False
+                for param in model.parameters():
+                    if param.grad is not None:
+                        if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
                             has_nan_grad = True
+                            break
 
-                    if has_nan_grad:
-                        print(f"警告: 任务 {task_id} 检测到NaN梯度，跳过更新")
-                        debugger.log_nan_task(task_id)  # 记录NaN任务
-                        epoch_nan_count += 1
-                        consecutive_nan += 1
+                if has_nan_grad:
+                    print(f"警告: 任务 {task_id} 检测到NaN梯度，跳过更新")
+                    debugger.log_nan_task(task_id)  # 记录NaN任务
+                    epoch_nan_count += 1
+                    consecutive_nan += 1
 
-                        # 连续NaN超过阈值时降低学习率
-                        if consecutive_nan >= nan_threshold:
-                            for param_group in optimizer.param_groups:
-                                param_group['lr'] *= 0.8
-                            print(f"检测到连续{consecutive_nan}次NaN梯度，学习率降低至{optimizer.param_groups[0]['lr']:.6f}")
-                            clip_value = max(0.1, clip_value * 0.8)  # 降低裁剪阈值
-                            print(f"梯度裁剪阈值降低至{clip_value:.3f}")
-                            consecutive_nan = 0  # 重置计数
-
-                        if use_amp:
-                            scaler.update()
-                    else:
-                        consecutive_nan = 0  # 重置连续NaN计数
-                        if use_amp:
-                            scaler.step(optimizer)
-                            scaler.update()
-                        else:
-                            optimizer.step()
-
+                    # 连续NaN超过阈值时降低学习率
+                    if consecutive_nan >= nan_threshold:
+                        for param_group in optimizer.param_groups:
+                            param_group['lr'] *= 0.8
+                        print(f"检测到连续{consecutive_nan}次NaN梯度，学习率降低至{optimizer.param_groups[0]['lr']:.6f}")
+                        clip_value = max(0.1, clip_value * 0.8)  # 降低裁剪阈值
+                        print(f"梯度裁剪阈值降低至{clip_value:.3f}")
+                        consecutive_nan = 0  # 重置计数
                 else:
-                    # 非混合精度训练
-                    # 1. 提取规则
-                    rule = model.extract_rule(train_input, train_output)
+                    consecutive_nan = 0  # 重置连续NaN计数
 
-                    # 2. 应用规则到测试输入
-                    predicted_output = model.apply_rule(test_input, rule)
+                    # 应用分层梯度裁剪
+                    layer_specific_gradient_clipping(model, optimizer, clip_value)
 
-                    # 3. 计算重构损失
-                    recon_loss = F.cross_entropy(
-                        predicted_output.reshape(-1, model.num_categories),
-                        torch.argmax(test_output, dim=1).reshape(-1)
-                    )
-
-                    # 4. 计算VQ损失
-                    vq_loss = rule['vq_loss']
-
-                    # 5. 总损失
-                    total_loss = recon_weight * recon_loss + vq_weight * vq_loss
-
-                    # 反向传播
-                    optimizer.zero_grad()
-                    total_loss.backward()
-
-                    # 检查梯度
-                    has_nan_grad = False
-                    for param in model.parameters():
-                        if param.grad is not None:
-                            if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                                has_nan_grad = True
-                                break
-
-                    if has_nan_grad:
-                        print(f"警告: 任务 {task_id} 检测到NaN梯度，跳过更新")
-                        debugger.log_nan_task(task_id)  # 记录NaN任务
-                        epoch_nan_count += 1
-                        consecutive_nan += 1
-
-                        # 连续NaN超过阈值时降低学习率
-                        if consecutive_nan >= nan_threshold:
-                            for param_group in optimizer.param_groups:
-                                param_group['lr'] *= 0.8
-                            print(f"检测到连续{consecutive_nan}次NaN梯度，学习率降低至{optimizer.param_groups[0]['lr']:.6f}")
-                            clip_value = max(0.1, clip_value * 0.8)  # 降低裁剪阈值
-                            print(f"梯度裁剪阈值降低至{clip_value:.3f}")
-                            consecutive_nan = 0  # 重置计数
-                    else:
-                        consecutive_nan = 0  # 重置连续NaN计数
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_value)
-                        optimizer.step()
+                    # 更新参数
+                    optimizer.step()
 
                 # 记录损失
                 epoch_losses['total'] += total_loss.item()
@@ -410,20 +365,19 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
                     # 在训练循环中
                     with torch.no_grad():
                         # 获取预测输出
-                        predicted_output = model(test_input)
+                        predicted_outputs = model(test_input)
 
                         # 处理元组输出
-                        if isinstance(predicted_output, tuple):
-                            prediction = predicted_output[0]
+                        if isinstance(predicted_outputs, tuple):
+                            prediction = predicted_outputs[0]
                         else:
-                            prediction = predicted_output
+                            prediction = predicted_outputs
 
                         # 使用第一个批次样本
                         pred = prediction[0]
 
                         # 可视化
                         robust_plot_results(task_id, test_input[0], test_output[0], pred, save_path)
-
 
         # 更新学习率
         scheduler.step()
@@ -487,6 +441,47 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
     return model, run_dir
 
 
+def stable_cross_entropy(pred, target, epsilon=1e-7):
+    """数值稳定的交叉熵损失"""
+    # 确保预测输出在有效范围内
+    if isinstance(pred, torch.Tensor) and pred.requires_grad:
+        # 只有当需要梯度时才使用clamp
+        pred = torch.clamp(pred, min=epsilon, max=1.0-epsilon)
+
+    # 计算交叉熵
+    return F.cross_entropy(pred, target)
+
+def layer_specific_gradient_clipping(model, optimizer, global_clip_value=0.5):
+    """针对不同层应用不同的梯度裁剪"""
+    # 定义层特定的裁剪值
+    clip_settings = {
+        'decoder.final_decoder': global_clip_value * 0.2,   # 最终解码器层使用更严格的裁剪
+        'decoder.low_decoder': global_clip_value * 0.5,     # 低级解码器使用中等裁剪
+        'decoder': global_clip_value * 0.8,                 # 其他解码器部分使用较大裁剪
+        'default': global_clip_value                        # 默认使用标准裁剪值
+    }
+
+    # 按层分组参数
+    param_groups = {}
+    for name, param in model.named_parameters():
+        if param.grad is None:
+            continue
+
+        # 分配到合适的组
+        group_name = 'default'
+        for key in clip_settings:
+            if key in name:
+                group_name = key
+                break
+
+        if group_name not in param_groups:
+            param_groups[group_name] = []
+        param_groups[group_name].append(param)
+
+    # 对每组应用不同的裁剪
+    for group_name, params in param_groups.items():
+        if params:
+            torch.nn.utils.clip_grad_norm_(params, clip_settings[group_name])
 
 
 

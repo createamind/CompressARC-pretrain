@@ -449,14 +449,14 @@ class HierarchicalDecoder(nn.Module):
             nn.LeakyReLU(0.2)
         )
 
-        # 最终解码 - 从16x16到30x30，确保输出 [batch, num_categories, H, W]
+
         self.final_decoder = nn.Sequential(
             nn.ConvTranspose2d(128 + pixel_dim, 96, 4, stride=2, padding=1),
-            nn.GroupNorm(16, 96),
-            nn.LeakyReLU(0.2),
+            nn.GroupNorm(16, 96, eps=1e-5),  # 增加eps参数提高数值稳定性
+            nn.ReLU(),  # 使用ReLU替代LeakyReLU，避免负值激活
             nn.Conv2d(96, 64, 3, padding=1),
-            nn.GroupNorm(8, 64),
-            nn.LeakyReLU(0.2),
+            nn.GroupNorm(8, 64, eps=1e-5),  # 增加eps参数
+            nn.ReLU(),  # 使用ReLU替代LeakyReLU
             nn.Conv2d(64, num_categories, 3, padding=1)
         )
 
@@ -601,6 +601,11 @@ class ObjectOrientedHierarchicalVAE(nn.Module):
 
         # 梯度缩放器
         self._scaler = 0.1
+
+        with torch.no_grad():
+            # 对最终输出层使用特殊初始化
+            nn.init.xavier_uniform_(self.final_decoder[-1].weight, gain=0.5)
+            nn.init.zeros_(self.final_decoder[-1].bias)
 
     def forward(self, x):
         batch_size = x.size(0)
