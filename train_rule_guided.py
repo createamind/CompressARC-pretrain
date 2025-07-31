@@ -18,6 +18,8 @@ from rule_guided_vae import RuleGuidedVAE
 from arc_dataset import get_arc_dataloader
 from utils import compute_task_complexity
 
+from hierarchical_vae import                              VectorQuantizer
+
 
 def check_gpu():
     """检查并详细报告GPU状态"""
@@ -86,7 +88,7 @@ def plot_results(task_id, input_grid, output_grid, predicted_grid, save_path):
         # 如果是3D数组，可能是 (batch=1, grid_cells=900, num_categories=10)
         # 或者是 (num_categories=10, height=30, width=30)
         if predicted_grid.shape[0] == 10:  # one-hot格式 (C, H, W)
-            print(f"预测是one-hot格式: {predicted_grid.shape}")
+            # print(f"预测是one-hot格式: {predicted_grid.shape}")
             pred_colors = torch.argmax(predicted_grid, dim=0).cpu().numpy()
         else:
             # 批次格式 (B, grid_cells, C)
@@ -100,7 +102,7 @@ def plot_results(task_id, input_grid, output_grid, predicted_grid, save_path):
         print(f"无法识别的预测格式: {predicted_grid.shape}")
         pred_colors = np.zeros((5, 5), dtype=np.int32)
 
-    print(f"处理后的形状: input={input_colors.shape}, output={output_colors.shape}, pred={pred_colors.shape}")
+    # print(f"处理后的形状: input={input_colors.shape}, output={output_colors.shape}, pred={pred_colors.shape}")
 
     # 裁剪网格以显示实际内容
     def crop_grid(grid):
@@ -143,7 +145,7 @@ def enhance_model_stability(model, clip_value=0.1):
     """增强模型训练稳定性的各种技巧"""
     # 1. 使用较小的梯度裁剪阈值
     original_clip_value = 0.5
-    print(f"增强稳定性: 梯度裁剪阈值从 {original_clip_value} 降低到 {clip_value}")
+    # print(f"增强稳定性: 梯度裁剪阈值从 {original_clip_value} 降低到 {clip_value}")
 
     # 2. 为所有BatchNorm和LayerNorm层添加eps
     for module in model.modules():
@@ -156,7 +158,7 @@ def enhance_model_stability(model, clip_value=0.1):
         if isinstance(module, VectorQuantizer):
             old_cost = module.commitment_cost
             module.commitment_cost = 0.1  # 降低commitment_cost值
-            print(f"增强稳定性: VQ模块 {name} 的commitment_cost从 {old_cost} 调整为 {module.commitment_cost}")
+            # print(f"增强稳定性: VQ模块 {name} 的commitment_cost从 {old_cost} 调整为 {module.commitment_cost}")
 
     return clip_value  # 返回新的裁剪阈值
 
@@ -225,7 +227,7 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
 
     # 优化器和学习率调度器
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=5e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-4)
 
     # 混合精度训练
     use_amp = has_gpu
@@ -421,7 +423,7 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
             f.write(json.dumps(log_data) + "\n")
 
         # 保存模型检查点
-        if (epoch + 1) % 5 == 0 or epoch == epochs - 1:
+        if (epoch + 1) % 13 == 0 or epoch == epochs - 1:
             checkpoint_path = os.path.join(run_dir, f'rule_guided_vae_epoch_{epoch+1}.pt')
             torch.save({
                 'epoch': epoch + 1,
@@ -446,9 +448,9 @@ if __name__ == "__main__":
                         help="Path to ARC training data")
     parser.add_argument("--save_dir", type=str, default="./checkpoints/rule_guided/",
                         help="Directory to save model checkpoints")
-    parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
+    parser.add_argument("--epochs", type=int, default=350, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=4, help="Number of tasks per batch")
-    parser.add_argument("--lr", type=float, default=0.005, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
     parser.add_argument("--rule_weight", type=float, default=1.0, help="Weight for rule loss")
     parser.add_argument("--recon_weight", type=float, default=5.0, help="Weight for reconstruction loss")
     parser.add_argument("--vq_weight", type=float, default=0.1, help="Weight for VQ loss")
