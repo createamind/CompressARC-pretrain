@@ -243,7 +243,7 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
 
     # 应用模型稳定性增强
     # clip_value = enhance_model_stability(model)
-    clip_value = fix_training_stall(model, optimizer)
+
 
     # 初始化NaN梯度调试器
     debugger = NaNGradientDebugger(model, log_dir=os.path.join(run_dir, "nan_debug"))
@@ -253,6 +253,8 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
     # 优化器和学习率调度器
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=5e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-4)
+
+    clip_value = fix_training_stall(model, optimizer)
 
     print(f"训练设备: {device}")
     if has_gpu:
@@ -357,7 +359,7 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
 
                     # 更新参数
                     optimizer.step()
-                    verify_func()  
+                    verify_func()
 
                 # 记录损失
                 epoch_losses['total'] += total_loss.item()
