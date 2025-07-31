@@ -252,7 +252,14 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
 
     # 优化器和学习率调度器
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=5e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-4)
+    # scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-4)
+    scheduler = torch.optim.lr_scheduler.CyclicLR(
+        optimizer,
+        base_lr=0.0007,
+        max_lr=0.002,
+        step_size_up=10,
+        cycle_momentum=False
+    )
 
     clip_value = fix_training_stall(model, optimizer)
 
