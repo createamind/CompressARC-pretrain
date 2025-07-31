@@ -69,7 +69,7 @@ def robust_plot_results(task_id, input_grid, output_grid, predicted_grid, save_p
     output_colors = torch.argmax(output_grid, dim=0).cpu().numpy()
 
     # 处理预测输出的形状问题
-    print(f"处理预测输出，原始形状: {predicted_grid.shape}")
+    # print(f"处理预测输出，原始形状: {predicted_grid.shape}")
 
     if isinstance(predicted_grid, torch.Tensor):
         # 张量情况
@@ -103,7 +103,7 @@ def robust_plot_results(task_id, input_grid, output_grid, predicted_grid, save_p
         # 非张量情况
         pred_colors = np.array([[0]])  # 默认显示
 
-    print(f"处理后的形状: input={input_colors.shape}, output={output_colors.shape}, pred={pred_colors.shape}")
+    # print(f"处理后的形状: input={input_colors.shape}, output={output_colors.shape}, pred={pred_colors.shape}")
 
     # 绘制网格
     axes[0].imshow(input_colors, vmin=0, vmax=9)
@@ -386,7 +386,7 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
                     # 在train_rule_guided.py中添加导入
                     # from fix_prediction_pipeline import direct_output_patch
 
-                    from fix_tuple_output import handle_tuple_output
+                    # from fix_tuple_output import handle_tuple_output
 
                     # 在训练循环中
                     with torch.no_grad():
@@ -395,12 +395,13 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
 
                         # 处理元组输出
                         if isinstance(predicted_output, tuple):
-                            prediction = handle_tuple_output(predicted_output)
+                            # prediction = handle_tuple_output(predicted_output)
+                            prediction = predicted_output[0]
                         else:
                             prediction = predicted_output
 
                         # 继续使用修复后的预测
-                        print(f"处理后的预测形状: {prediction.shape}")
+                        # print(f"处理后的预测形状: {prediction.shape}")
 
                         # 使用第一个批次样本
                         pred = prediction[0]
