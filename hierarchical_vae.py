@@ -409,22 +409,23 @@ class HierarchicalEncoder(nn.Module):
         }
 
 
+
 class HierarchicalDecoder(nn.Module):
-    """分层次解码器 - 增加稳定性"""
+    """修复版增强分层次解码器 - 确保输出格式兼容"""
     def __init__(self, grid_size=30, num_categories=10, pixel_dim=64, object_dim=128, relation_dim=64):
         super().__init__()
         self.grid_size = grid_size
         self.num_categories = num_categories
+        self.object_dim = object_dim
 
-        # 计算转置卷积输出尺寸
-        # 用于自适应池化的固定尺寸
+        # 保持原有的尺寸参数
         self.pool_size = 4
         self.level2_size = 8  # 从4x4 -> 8x8
         self.level1_size = 16  # 从8x8 -> 16x16
 
-        print(f"解码器特征图尺寸: 4x4 -> {self.level2_size}x{self.level2_size} -> {self.level1_size}x{self.level1_size} -> {grid_size}x{grid_size}")
+        print(f"修复解码器特征图尺寸: 4x4 -> {self.level2_size}x{self.level2_size} -> {self.level1_size}x{self.level1_size} -> {grid_size}x{grid_size}")
 
-        # 高级特征处理
+        # 高级特征处理 - 恢复与原始解码器相似的结构
         self.high_processor = nn.Sequential(
             nn.Linear(512 + relation_dim, 512),
             nn.LayerNorm(512),
@@ -436,69 +437,94 @@ class HierarchicalDecoder(nn.Module):
 
         # 中级特征解码 - 从4x4到8x8
         self.mid_decoder = nn.Sequential(
-            nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1),
-            nn.GroupNorm(16, 128),
+            nn.ConvTranspose2d(256, 192, 4, stride=2, padding=1),  # 256->192
+            nn.GroupNorm(16, 192),
             nn.LeakyReLU(0.2)
         )
 
         # 低级特征解码 - 从8x8到16x16
         self.low_decoder = nn.Sequential(
-            nn.ConvTranspose2d(128 + object_dim, 64, 4, stride=2, padding=1),
-            nn.GroupNorm(8, 64),
+            nn.ConvTranspose2d(192 + object_dim, 128, 4, stride=2, padding=1),
+            nn.GroupNorm(16, 128),
             nn.LeakyReLU(0.2)
         )
 
-        # 最终解码 - 从16x16到30x30
+        # 最终解码 - 从16x16到30x30，确保输出 [batch, num_categories, H, W]
         self.final_decoder = nn.Sequential(
-            nn.ConvTranspose2d(64 + pixel_dim, 64, 4, stride=2, padding=1),
+            nn.ConvTranspose2d(128 + pixel_dim, 96, 4, stride=2, padding=1),
+            nn.GroupNorm(16, 96),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(96, 64, 3, padding=1),
+            nn.GroupNorm(8, 64),
             nn.LeakyReLU(0.2),
             nn.Conv2d(64, num_categories, 3, padding=1)
         )
 
+        # 简化的对象特征处理
+        self.object_adapter = nn.Linear(object_dim, object_dim)
+
     def forward(self, pixel_features, object_features, relation_features, high_features):
-        # 处理高级特征与关系特征
+        batch_size = high_features.shape[0]
+
+        # 1. 处理高级特征与关系特征
         combined_high = torch.cat([high_features, relation_features], dim=1)
         high_processed = self.high_processor(combined_high)
-        high_processed = high_processed.view(-1, 256, 4, 4)
+        high_processed = high_processed.view(batch_size, 256, 4, 4)  # 重要：确保正确的形状
 
-        # 解码中级特征
-        mid_decoded = self.mid_decoder(high_processed)
+        # 2. 解码中级特征
+        mid_decoded = self.mid_decoder(high_processed)  # [batch, 192, 8, 8]
 
-        # 将对象特征转换为空间图
-        batch_size = mid_decoded.shape[0]
-        object_map = torch.zeros(batch_size, object_features.shape[-1],
+        # 3. 处理对象特征 - 使用简化且可靠的方法
+        # 创建统一大小的对象特征图
+        object_map = torch.zeros(batch_size, self.object_dim,
                                 self.level2_size, self.level2_size,
-                                device=object_features.device)
+                                device=high_features.device)
 
-        # 这里简化处理，直接使用全局对象特征
-        for b in range(batch_size):
-            object_map[b] = object_features[b].unsqueeze(-1).unsqueeze(-1).expand(-1, self.level2_size, self.level2_size).mean(0, keepdim=True)
+        # 处理对象特征
+        if isinstance(object_features, torch.Tensor) and object_features.dim() > 1:
+            # 对于张量，简单处理并扩展
+            obj_feat = self.object_adapter(object_features.reshape(-1, self.object_dim))
+            obj_feat = obj_feat.view(batch_size, -1, self.object_dim)  # [batch, objects, dim]
 
-        # 合并中级特征和对象特征
+            # 取每个批次的平均特征
+            mean_obj = obj_feat.mean(dim=1)  # [batch, dim]
+
+            # 扩展到空间维度
+            for b in range(batch_size):
+                object_map[b] = mean_obj[b].view(-1, 1, 1).expand(-1, self.level2_size, self.level2_size)
+
+        # 4. 合并中级特征和对象特征
         mid_with_objects = torch.cat([mid_decoded, object_map], dim=1)
 
-        # 解码低级特征
-        low_decoded = self.low_decoder(mid_with_objects)
+        # 5. 解码低级特征
+        low_decoded = self.low_decoder(mid_with_objects)  # [batch, 128, 16, 16]
 
-        # 将像素特征上采样到与low_decoded相同大小
+        # 6. 将像素特征上采样
         pixel_upsampled = F.interpolate(pixel_features,
                                        size=(self.level1_size, self.level1_size),
                                        mode='bilinear',
                                        align_corners=False)
 
-        # 合并低级特征和像素特征
+        # 7. 合并低级特征和像素特征
         low_with_pixels = torch.cat([low_decoded, pixel_upsampled], dim=1)
 
-        # 最终解码
-        output_raw = self.final_decoder(low_with_pixels)
+        # 8. 最终解码 - 确保输出正确形状
+        output = self.final_decoder(low_with_pixels)
 
-        # 明确裁剪到30x30
-        output = output_raw[:, :, :self.grid_size, :self.grid_size]
+        # 剪裁到正确大小
+        output = output[:, :, :self.grid_size, :self.grid_size]
 
-        # 调整输出形状为批次、网格单元、类别
-        output = output.permute(0, 2, 3, 1).reshape(batch_size, -1, self.num_categories)
+        # 打印形状以确认
+        # print(f"解码器输出形状: {output.shape}")
 
         return output
+
+
+
+
+
+
+
 
 
 class ObjectOrientedHierarchicalVAE(nn.Module):
