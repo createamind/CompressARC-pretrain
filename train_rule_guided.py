@@ -19,7 +19,7 @@ from arc_dataset import get_arc_dataloader
 from utils import compute_task_complexity
 
 from hierarchical_vae import                              VectorQuantizer
-
+from fix_training_stall import *
 
 def check_gpu():
     """检查并详细报告GPU状态"""
@@ -242,7 +242,8 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
     model.to(device)
 
     # 应用模型稳定性增强
-    clip_value = enhance_model_stability(model)
+    # clip_value = enhance_model_stability(model)
+    clip_value = fix_training_stall(model, optimizer)
 
     # 初始化NaN梯度调试器
     debugger = NaNGradientDebugger(model, log_dir=os.path.join(run_dir, "nan_debug"))
@@ -301,10 +302,14 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
                 predicted_output = model.apply_rule(test_input, rule)
 
                 # 3. 计算重构损失 - 使用稳定版本
-                recon_loss = stable_cross_entropy(
+                # recon_loss = stable_cross_entropy(
+                #     predicted_output.reshape(-1, model.num_categories),
+                #     torch.argmax(test_output, dim=1).reshape(-1),
+                #     epsilon=1e-7
+                # )
+                recon_loss = unstable_cross_entropy(
                     predicted_output.reshape(-1, model.num_categories),
-                    torch.argmax(test_output, dim=1).reshape(-1),
-                    epsilon=1e-7
+                    torch.argmax(test_output, dim=1).reshape(-1)
                 )
 
                 # 4. 计算VQ损失
@@ -343,10 +348,16 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
                     consecutive_nan = 0  # 重置连续NaN计数
 
                     # 应用分层梯度裁剪
-                    layer_specific_gradient_clipping(model, optimizer, clip_value)
+                    # layer_specific_gradient_clipping(model, optimizer, clip_value)
+                    verify_func = verify_parameter_updates(model, optimizer)
+
+                    # 在此处替换梯度裁剪函数
+                    # layer_specific_gradient_clipping(model, optimizer, clip_value)
+                    modified_layer_specific_gradient_clipping(model, optimizer, clip_value)
 
                     # 更新参数
                     optimizer.step()
+                    verify_func()  
 
                 # 记录损失
                 epoch_losses['total'] += total_loss.item()
