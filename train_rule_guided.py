@@ -152,6 +152,9 @@ def enhance_model_stability(model, clip_value=0.1):
 
     return clip_value  # 返回新的裁剪阈值
 
+
+from nan_gradient_debugger import NaNGradientDebugger
+
 def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
                          learning_rate=1e-3, rule_weight=1.0, recon_weight=5.0,
                          vq_weight=0.1, gpu_id=None):
@@ -215,6 +218,11 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
     )
     model.to(device)
 
+    # 初始化NaN梯度调试器
+    debugger = NaNGradientDebugger(model, log_dir=os.path.join(run_dir, "nan_debug"))
+    debugger.register_hooks()
+    print("已启用NaN梯度追踪与分析")
+
     # 优化器和学习率调度器
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=5e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-4)
@@ -232,6 +240,12 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
     print(f"模型参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     print(f"结果将保存到: {run_dir}")
 
+    # NaN梯度追踪变量
+    nan_count = 0
+    nan_threshold = 5
+    consecutive_nan = 0
+    clip_value = 0.5  # 初始裁剪值
+
     # 训练循环
     for epoch in range(epochs):
         model.train()
@@ -239,6 +253,7 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
 
         epoch_losses = defaultdict(float)
         task_count = 0
+        epoch_nan_count = 0  # 本轮次NaN计数
 
         for batch_tasks in dataloader:
             for task in batch_tasks:
@@ -246,6 +261,9 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
                 train_examples = task['train']
                 test_input = task['test']['input'].to(device)
                 test_output = task['test']['output'].to(device)
+
+                # 记录当前任务输入，以便在出现NaN时分析
+                debugger.save_input_on_nan(task_id, test_input)
 
                 # 如果任务只有一个训练样例，直接使用
                 # 否则，随机选择一个作为示例
@@ -294,21 +312,30 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
                                         break
 
                             if not has_nan_grad:
-                                clip_value = enhance_model_stability(model)
-
-                                # 在反向传播处使用新的裁剪阈值
                                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_value)
-
-                                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
                         except RuntimeError as e:
                             print(f"警告: 缩放器错误: {e}")
                             has_nan_grad = True
 
                     if has_nan_grad:
                         print(f"警告: 任务 {task_id} 检测到NaN梯度，跳过更新")
+                        debugger.log_nan_task(task_id)  # 记录NaN任务
+                        epoch_nan_count += 1
+                        consecutive_nan += 1
+
+                        # 连续NaN超过阈值时降低学习率
+                        if consecutive_nan >= nan_threshold:
+                            for param_group in optimizer.param_groups:
+                                param_group['lr'] *= 0.8
+                            print(f"检测到连续{consecutive_nan}次NaN梯度，学习率降低至{optimizer.param_groups[0]['lr']:.6f}")
+                            clip_value = max(0.1, clip_value * 0.8)  # 降低裁剪阈值
+                            print(f"梯度裁剪阈值降低至{clip_value:.3f}")
+                            consecutive_nan = 0  # 重置计数
+
                         if use_amp:
                             scaler.update()
                     else:
+                        consecutive_nan = 0  # 重置连续NaN计数
                         if use_amp:
                             scaler.step(optimizer)
                             scaler.update()
@@ -349,12 +376,21 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
 
                     if has_nan_grad:
                         print(f"警告: 任务 {task_id} 检测到NaN梯度，跳过更新")
-                    else:
-                        clip_value = enhance_model_stability(model)
+                        debugger.log_nan_task(task_id)  # 记录NaN任务
+                        epoch_nan_count += 1
+                        consecutive_nan += 1
 
-                        # 在反向传播处使用新的裁剪阈值
+                        # 连续NaN超过阈值时降低学习率
+                        if consecutive_nan >= nan_threshold:
+                            for param_group in optimizer.param_groups:
+                                param_group['lr'] *= 0.8
+                            print(f"检测到连续{consecutive_nan}次NaN梯度，学习率降低至{optimizer.param_groups[0]['lr']:.6f}")
+                            clip_value = max(0.1, clip_value * 0.8)  # 降低裁剪阈值
+                            print(f"梯度裁剪阈值降低至{clip_value:.3f}")
+                            consecutive_nan = 0  # 重置计数
+                    else:
+                        consecutive_nan = 0  # 重置连续NaN计数
                         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_value)
-                        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
                         optimizer.step()
 
                 # 记录损失
@@ -371,23 +407,6 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
                         f'epoch_{epoch+1}_task_{task_id.replace(".json", "")}.png'
                     )
 
-                    # with torch.no_grad():
-                    #     # 修改：正确处理解码器输出格式
-                    #     pred_output = F.softmax(predicted_output[0], dim=1)  # [grid_cells, num_categories]
-
-                    #     # 将输出重塑为网格
-                    #     grid_size = int(math.sqrt(pred_output.size(0)))
-                    #     reshaped_pred = pred_output.view(grid_size, grid_size, -1).permute(2, 0, 1)  # [C, H, W]
-
-                    #     plot_results(task_id, test_input[0], test_output[0], reshaped_pred, save_path)
-
-
-
-                    # 在train_rule_guided.py中添加导入
-                    # from fix_prediction_pipeline import direct_output_patch
-
-                    # from fix_tuple_output import handle_tuple_output
-
                     # 在训练循环中
                     with torch.no_grad():
                         # 获取预测输出
@@ -395,13 +414,9 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
 
                         # 处理元组输出
                         if isinstance(predicted_output, tuple):
-                            # prediction = handle_tuple_output(predicted_output)
                             prediction = predicted_output[0]
                         else:
                             prediction = predicted_output
-
-                        # 继续使用修复后的预测
-                        # print(f"处理后的预测形状: {prediction.shape}")
 
                         # 使用第一个批次样本
                         pred = prediction[0]
@@ -422,7 +437,13 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
               f'平均损失: {avg_losses["total"]:.4f}, '
               f'平均重构: {avg_losses["recon"]:.4f}, '
               f'平均VQ: {avg_losses["vq"]:.4f}, '
+              f'NaN梯度次数: {epoch_nan_count}, '
               f'学习率: {scheduler.get_last_lr()[0]:.6f}')
+
+        # 每5个epoch分析NaN梯度情况
+        if (epoch + 1) % 5 == 0:
+            print(f"\n===== 轮次 {epoch+1} NaN梯度分析 =====")
+            debugger.analyze_and_report()
 
         # 保存训练日志
         log_data = {
@@ -430,6 +451,7 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
             "loss": avg_losses["total"],
             "recon_loss": avg_losses["recon"],
             "vq_loss": avg_losses["vq"],
+            "nan_count": epoch_nan_count,
             "lr": scheduler.get_last_lr()[0],
             "time": epoch_time
         }
@@ -450,12 +472,22 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
             }, checkpoint_path)
             print(f'检查点已保存到 {checkpoint_path}')
 
+    # 训练结束，生成最终NaN梯度分析报告
+    print("\n===== 训练结束，最终NaN梯度分析 =====")
+    debugger.analyze_and_report()
+
+    # 清理钩子
+    debugger.remove_hooks()
+
     # 保存最终模型
     final_model_path = os.path.join(run_dir, f'final_rule_guided_vae.pt')
     torch.save(model.state_dict(), final_model_path)
     print(f'最终模型已保存到 {final_model_path}')
 
     return model, run_dir
+
+
+
 
 
 if __name__ == "__main__":
