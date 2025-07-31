@@ -9,7 +9,7 @@ def fix_training_stall(model, optimizer):
     print("\n==== 应用训练停滞修复 ====")
 
     # 1. 检查并修复梯度裁剪过度问题
-    global_clip_value = 5.0  # 增大梯度裁剪阈值
+    global_clip_value = 4.0  # 增大梯度裁剪阈值
     print(f"将梯度裁剪阈值增大到 {global_clip_value}")
 
     # 2. 重置优化器统计量
@@ -18,7 +18,7 @@ def fix_training_stall(model, optimizer):
 
     # 3. 提高学习率
     for param_group in optimizer.param_groups:
-        param_group['lr'] = param_group['lr'] * 3.0  # 提高学习率
+        param_group['lr'] = param_group['lr'] * 1.1  # 提高学习率
         print(f"学习率调整为: {param_group['lr']:.6f}")
 
     # 4. 恢复LeakyReLU激活函数以增加梯度信号
