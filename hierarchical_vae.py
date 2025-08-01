@@ -410,21 +410,21 @@ class HierarchicalEncoder(nn.Module):
 
 
 class HierarchicalDecoder(nn.Module):
-    """分层次解码器 - 增加稳定性"""
+    """修复版增强分层次解码器 - 确保输出格式兼容"""
     def __init__(self, grid_size=30, num_categories=10, pixel_dim=64, object_dim=128, relation_dim=64):
         super().__init__()
         self.grid_size = grid_size
         self.num_categories = num_categories
+        self.object_dim = object_dim
 
-        # 计算转置卷积输出尺寸
-        # 用于自适应池化的固定尺寸
+        # 保持原有的尺寸参数
         self.pool_size = 4
         self.level2_size = 8  # 从4x4 -> 8x8
         self.level1_size = 16  # 从8x8 -> 16x16
 
-        print(f"解码器特征图尺寸: 4x4 -> {self.level2_size}x{self.level2_size} -> {self.level1_size}x{self.level1_size} -> {grid_size}x{grid_size}")
+        print(f"修复解码器特征图尺寸: 4x4 -> {self.level2_size}x{self.level2_size} -> {self.level1_size}x{self.level1_size} -> {grid_size}x{grid_size}")
 
-        # 高级特征处理
+        # 高级特征处理 - 恢复与原始解码器相似的结构
         self.high_processor = nn.Sequential(
             nn.Linear(512 + relation_dim, 512),
             nn.LayerNorm(512),
@@ -436,24 +436,32 @@ class HierarchicalDecoder(nn.Module):
 
         # 中级特征解码 - 从4x4到8x8
         self.mid_decoder = nn.Sequential(
-            nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1),
-            nn.GroupNorm(16, 128),
+            nn.ConvTranspose2d(256, 192, 4, stride=2, padding=1),  # 256->192
+            nn.GroupNorm(16, 192),
             nn.LeakyReLU(0.2)
         )
 
         # 低级特征解码 - 从8x8到16x16
         self.low_decoder = nn.Sequential(
-            nn.ConvTranspose2d(128 + object_dim, 64, 4, stride=2, padding=1),
-            nn.GroupNorm(8, 64),
+            nn.ConvTranspose2d(192 + object_dim, 128, 4, stride=2, padding=1),
+            nn.GroupNorm(16, 128),
             nn.LeakyReLU(0.2)
         )
 
-        # 最终解码 - 从16x16到30x30
+
         self.final_decoder = nn.Sequential(
-            nn.ConvTranspose2d(64 + pixel_dim, 64, 4, stride=2, padding=1),
-            nn.LeakyReLU(0.2),
+            nn.ConvTranspose2d(128 + pixel_dim, 96, 4, stride=2, padding=1),
+            nn.GroupNorm(16, 96, eps=1e-5),  # 增加eps参数提高数值稳定性
+            nn.ReLU(),  # 使用ReLU替代LeakyReLU，避免负值激活
+            nn.Conv2d(96, 64, 3, padding=1),
+            nn.GroupNorm(8, 64, eps=1e-5),  # 增加eps参数
+            nn.ReLU(),  # 使用ReLU替代LeakyReLU
             nn.Conv2d(64, num_categories, 3, padding=1)
         )
+
+        # 简化的对象特征处理
+        # self.object_adapter = nn.Linear(object_dim, object_dim)
+
 
     def forward(self, pixel_features, object_features, relation_features, high_features):
         # 处理高级特征与关系特征
