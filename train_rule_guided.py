@@ -243,9 +243,19 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
     print(f"模型参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     print(f"结果将保存到: {run_dir}")
 
-    if resume_path:
-        start_epoch, _ = load_checkpoint(resume_path, model, optimizer, scheduler)
-        print(f"从轮次 {start_epoch+1} 继续训练")
+    # if resume_path:
+    #     start_epoch, _ = load_checkpoint(resume_path, model, optimizer, scheduler)
+    #     print(f"从轮次 {start_epoch+1} 继续训练")
+    if resume_path and os.path.exists(resume_path):
+        args = argparse.Namespace()
+        args.reset_optimizer = False
+        args.reset_lr = False
+        try:
+            start_epoch, _ = load_checkpoint(resume_path, model, optimizer, scheduler, args)
+            print(f"成功加载检查点，从轮次 {start_epoch} 继续训练")
+        except Exception as e:
+            print(f"加载检查点失败: {e}")
+            print("继续使用初始化模型训练")
 
 
     # 训练循环
