@@ -177,6 +177,7 @@ def enhance_model_stability(model):
 
 
 from nan_gradient_debugger import NaNGradientDebugger
+from fix_decoder_output import fix_decoder_output_format
 
 def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
                          learning_rate=1e-3, rule_weight=1.0, recon_weight=5.0,
@@ -260,6 +261,8 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
         step_size_up=10,
         cycle_momentum=False
     )
+
+    fixed_plot_results = fix_decoder_output_format(model)
 
     clip_value = fix_training_stall(model, optimizer)
 
@@ -397,7 +400,7 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
                         pred = prediction[0]
 
                         # 可视化
-                        robust_plot_results(task_id, test_input[0], test_output[0], pred, save_path)
+                        fixed_plot_results(task_id, test_input[0], test_output[0], pred, save_path)
 
         # 更新学习率
         scheduler.step()
