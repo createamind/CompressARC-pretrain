@@ -19,6 +19,7 @@ from arc_dataset import get_arc_dataloader
 from utils import compute_task_complexity
 
 from hierarchical_vae import                              VectorQuantizer
+from checkpoint_reload import add_checkpoint_reload_functionality, load_checkpoint
 
 
 def check_gpu():
@@ -164,7 +165,7 @@ def enhance_model_stability(model, clip_value=0.1):
 
 def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
                          learning_rate=1e-3, rule_weight=1.0, recon_weight=5.0,
-                         vq_weight=0.1, gpu_id=None):
+                         vq_weight=0.1, gpu_id=None, resume_path=""):
     """训练规则引导VAE模型"""
     # 创建以时间戳命名的子目录
     current_time = datetime.datetime.now()
@@ -241,6 +242,11 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
     print(f"批量大小: {batch_size} 任务/批次")
     print(f"模型参数数量: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     print(f"结果将保存到: {run_dir}")
+
+    if resume_path:
+        start_epoch, _ = load_checkpoint(resume_path, model, optimizer, scheduler)
+        print(f"从轮次 {start_epoch+1} 继续训练")
+
 
     # 训练循环
     for epoch in range(epochs):
@@ -456,6 +462,8 @@ if __name__ == "__main__":
     parser.add_argument("--vq_weight", type=float, default=0.1, help="Weight for VQ loss")
     parser.add_argument("--gpu", type=int, default=0, help="Specific GPU to use")
 
+    parser = add_checkpoint_reload_functionality(parser)
+
     args = parser.parse_args()
 
     model, run_dir = train_rule_guided_vae(
@@ -467,7 +475,8 @@ if __name__ == "__main__":
         rule_weight=args.rule_weight,
         recon_weight=args.recon_weight,
         vq_weight=args.vq_weight,
-        gpu_id=args.gpu
+        gpu_id=args.gpu,
+        resume_path=args.resume
     )
 
     print(f"训练完成，结果保存在: {run_dir}")
