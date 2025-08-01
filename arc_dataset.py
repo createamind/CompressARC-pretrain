@@ -24,26 +24,26 @@ class ARCTaskDataset(Dataset):
                         'train': [],
                         'test': {}
                     }
-                    
+
                     # 处理训练样例
                     for train_ex in task_data['train']:
                         input_grid = self._preprocess_grid(train_ex['input'])
                         output_grid = self._preprocess_grid(train_ex['output'])
-                        
+
                         # 转换为one-hot编码
                         input_onehot = self._to_onehot(input_grid)
                         output_onehot = self._to_onehot(output_grid)
-                        
+
                         task['train'].append((input_onehot, output_onehot))
-                    
+
                     # 处理测试样例
                     test_input = self._preprocess_grid(task_data['test'][0]['input'])
                     test_output = self._preprocess_grid(task_data['test'][0]['output'])
                     task['test']['input'] = self._to_onehot(test_input)
                     task['test']['output'] = self._to_onehot(test_output)
-                    
+
                     self.tasks.append(task)
-        
+
         print(f"Loaded {len(self.tasks)} ARC tasks")
 
     def _preprocess_grid(self, grid):
@@ -55,12 +55,12 @@ class ARCTaskDataset(Dataset):
         """转换网格为one-hot编码"""
         h, w = grid.shape
         one_hot = torch.zeros(10, 30, 30)  # 固定大小，10个类别
-        
+
         # 复制数据到fixed-size数组
         for i in range(min(h, 30)):
             for j in range(min(w, 30)):
                 one_hot[grid[i, j], i, j] = 1
-        
+
         return one_hot
 
     def __len__(self):
@@ -75,6 +75,10 @@ def collate_arc_tasks(batch):
     # batch是一个包含多个任务的列表
     return batch  # 简单返回任务列表，不做额外处理
 
+def get_arc_dataset(data_path):
+    """只加载数据集，不创建DataLoader"""
+    dataset = ARCTaskDataset(data_path)
+    return dataset
 
 def get_arc_dataloader(data_path, batch_size=4, shuffle=True, num_workers=2):
     """创建ARC任务数据加载器"""
