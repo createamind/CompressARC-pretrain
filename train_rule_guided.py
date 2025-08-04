@@ -150,7 +150,14 @@ def train_rule_guided_from_pretrained(
 
     # 定义优化器和学习率调度器
     optimizer = optim.AdamW(trainable_params, lr=learning_rate, weight_decay=1e-5)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+    # scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+    scheduler = torch.optim.lr_scheduler.CyclicLR(
+    optimizer,
+    base_lr=0.0007,
+    max_lr=0.002,
+    step_size_up=10,
+    cycle_momentum=False
+)
 
     # 检查是否有需要恢复的训练断点
     start_epoch = 0
