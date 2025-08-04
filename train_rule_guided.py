@@ -557,7 +557,7 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
         train_accuracies.append(train_accuracy)
 
         # 验证阶段
-        print("执行验证...")
+        # print("执行验证...")
         val_avg_losses, val_accuracy = evaluate_model(
             model, val_dataloader, device, recon_weight, vq_weight
         )
@@ -619,11 +619,11 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
 
         # 打印epoch摘要
         epoch_time = time.time() - start_time
-        print(f'轮次: {epoch+1}/{epochs}, 耗时: {epoch_time:.2f}s')
+        # print(f'轮次: {epoch+1}/{epochs}, 耗时: {epoch_time:.2f}s')
         print(f'训练 - 损失: {avg_train_losses["total"]:.4f}, 准确率: {train_accuracy:.4f}')
         print(f'验证 - 损失: {val_avg_losses["total"]:.4f}, 准确率: {val_accuracy:.4f}')
-        print(f'最佳轮次: {best_epoch}, 最佳验证损失: {best_val_loss:.4f}')
-        print(f'学习率: {scheduler.get_last_lr()[0]:.6f}')
+        # print(f'最佳轮次: {best_epoch}, 最佳验证损失: {best_val_loss:.4f}')
+        # print(f'学习率: {scheduler.get_last_lr()[0]:.6f}')
         print(f'轮次: {epoch+1}/{epochs}, 耗时: {epoch_time:.2f}s, '
               f'平均损失: {avg_train_losses["total"]:.4f}, '
               f'平均重构: {avg_train_losses["recon"]:.4f}, '
