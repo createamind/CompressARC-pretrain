@@ -68,48 +68,48 @@ def fix_decoder_output_format(model):
 
     # 替换解码器的前向传播方法
     model.decoder.forward = types.MethodType(fixed_forward, model.decoder)
-    
+
     # 修复应用规则函数以处理不同尺寸
     original_apply_rule = model.apply_rule
-    
+
     def fixed_apply_rule(self, input_grid, rule):
         # 获取原始规则应用结果
-        result = original_apply_rule(self, input_grid, rule)
-        
+        result = original_apply_rule( input_grid, rule)
+
         # 如果输出形状不匹配输入，进行修复
         if isinstance(result, torch.Tensor):
             input_shape = input_grid.shape
             if len(input_shape) >= 4 and len(result.shape) >= 3:
                 # 确保输出与输入具有相同的空间尺寸
                 input_h, input_w = input_shape[2:4]
-                
+
                 # 如果是 [batch, pixels, categories] 格式
                 if result.dim() == 3 and result.shape[1] == self.grid_size * self.grid_size:
                     # 重塑为空间格式，裁剪，再展平
                     result = result.reshape(result.shape[0], self.grid_size, self.grid_size, -1)
                     result = result[:, :input_h, :input_w, :]  # 裁剪
                     result = result.reshape(result.shape[0], input_h * input_w, -1)  # 展平
-                
+
         return result
-    
+
     # 替换应用规则方法
     model.apply_rule = types.MethodType(fixed_apply_rule, model)
-    
+
     # 修复可视化函数以正确处理模型输出
     def fix_visualization(task_id, input_grid, target_grid, predicted_grid, save_path):
         """修复后的可视化函数，正确处理模型输出格式"""
         import matplotlib.pyplot as plt
         import numpy as np
-        
+
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        
+
         # 转换输入和输出的one-hot为颜色网格
         input_colors = torch.argmax(input_grid, dim=0).cpu().numpy()
         output_colors = torch.argmax(target_grid, dim=0).cpu().numpy()
-        
+
         # 获取真实网格尺寸（非填充尺寸）
         h, w = input_colors.shape
-        
+
         # 处理预测输出的不同格式
         if isinstance(predicted_grid, torch.Tensor):
             if predicted_grid.dim() == 3 and predicted_grid.shape[0] == 10:
@@ -128,32 +128,32 @@ def fix_decoder_output_format(model):
         else:
             # 非张量，可能是NumPy数组
             pred_colors = np.array([[0]])
-            
+
         # 确保裁剪到正确尺寸
         if pred_colors.shape[0] > h or pred_colors.shape[1] > w:
             pred_colors = pred_colors[:h, :w]
-        
+
         # 绘制网格
         axes[0].imshow(input_colors, vmin=0, vmax=9)
         axes[0].set_title('Input')
         axes[0].grid(True, color='black', linewidth=0.5)
-        
+
         axes[1].imshow(output_colors, vmin=0, vmax=9)
         axes[1].set_title('Expected Output')
         axes[1].grid(True, color='black', linewidth=0.5)
-        
+
         axes[2].imshow(pred_colors, vmin=0, vmax=9)
         axes[2].set_title(f'Predicted Output {pred_colors.shape}')
         axes[2].grid(True, color='black', linewidth=0.5)
-        
+
         plt.suptitle(f'Task: {task_id}')
         plt.tight_layout()
-        
+
         if save_path:
             plt.savefig(save_path)
         else:
             plt.show()
         plt.close()
-    
+
     print("解码器输出格式修复完成！")
     return fix_visualization
