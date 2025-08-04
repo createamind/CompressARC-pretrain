@@ -624,6 +624,18 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
         print(f'验证 - 损失: {val_avg_losses["total"]:.4f}, 准确率: {val_accuracy:.4f}')
         print(f'最佳轮次: {best_epoch}, 最佳验证损失: {best_val_loss:.4f}')
         print(f'学习率: {scheduler.get_last_lr()[0]:.6f}')
+        print(f'轮次: {epoch+1}/{epochs}, 耗时: {epoch_time:.2f}s, '
+              f'平均损失: {avg_train_losses["total"]:.4f}, '
+              f'平均重构: {avg_train_losses["recon"]:.4f}, '
+              f'平均VQ: {avg_train_losses["vq"]:.4f}, '
+            #   f'NaN梯度次数: {epoch_nan_count}, '
+              f'学习率: {scheduler.get_last_lr()[0]:.6f}')
+        print(f'轮次: {epoch+1}/{epochs}, 耗时: {epoch_time:.2f}s, '
+              f'平均损失: {val_avg_losses["total"]:.4f}, '
+              f'平均重构: {val_avg_losses["recon"]:.4f}, '
+              f'平均VQ: {val_avg_losses["vq"]:.4f}, '
+            #   f'NaN梯度次数: {epoch_nan_count}, '
+              f'学习率: {scheduler.get_last_lr()[0]:.6f}')
 
         # 保存训练日志
         log_data = {
