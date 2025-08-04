@@ -326,10 +326,10 @@ def train_rule_guided_vae(data_path, save_dir, epochs=50, batch_size=4,
     model = RuleGuidedVAE(
         grid_size=30,
         num_categories=10,
-        pixel_codebook_size=512,
+        pixel_codebook_size=64,
         object_codebook_size=256,
         rule_codebook_size=128,
-        pixel_dim=64,
+        pixel_dim=8,
         object_dim=128,
         relation_dim=64,
         rule_dim=128
