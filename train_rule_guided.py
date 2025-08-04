@@ -27,6 +27,362 @@ from checkpoint_reload import add_checkpoint_reload_functionality, load_checkpoi
 
 
 
+import logging
+
+
+
+
+
+# 在现有的train_rule_guided.py文件中添加以下函数
+
+def train_rule_guided_from_pretrained(
+    pretrained_path,
+    data_path,
+    save_dir,
+    epochs=200,
+    batch_size=4,
+    learning_rate=5e-4,
+    recon_weight=5.0,
+    vq_weight=0.1,
+    rule_weight=1.0,
+    gpu_id=None,
+    resume_path="",
+    val_split=0.1,
+    finetune_ae=True,
+    seed=42
+):
+    """
+    从预训练的自编码器继续训练规则提取和应用能力
+
+    参数:
+        pretrained_path: 预训练的自编码器权重路径
+        finetune_ae: 是否微调自编码器
+    """
+    # 设置随机种子
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    # 设置设备
+    if gpu_id is not None and torch.cuda.is_available():
+        device = torch.device(f"cuda:{gpu_id}")
+        torch.cuda.set_device(gpu_id)
+    else:
+        device = torch.device("cpu")
+    print(f"使用设备: {device}")
+
+    # 创建结果目录
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join(save_dir, f"rule_train_{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
+
+    # 设置日志
+    logging.basicConfig(
+        filename=os.path.join(run_dir, "training.log"),
+        level=logging.INFO,
+        format='%(asctime)s - %(message)s'
+    )
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    logging.getLogger().addHandler(console_handler)
+
+    # 加载数据并划分训练/验证集
+    dataset = get_arc_dataset(data_path)
+    dataset_size = len(dataset)
+    val_size = max(1, int(dataset_size * val_split))
+    train_size = dataset_size - val_size
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        dataset, [train_size, val_size],
+        generator=torch.Generator().manual_seed(seed)
+    )
+
+    train_dataloader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True,
+        num_workers=4, collate_fn=collate_arc_tasks
+    )
+
+    val_dataloader = DataLoader(
+        val_dataset, batch_size=batch_size, shuffle=False,
+        num_workers=4, collate_fn=collate_arc_tasks
+    )
+
+    logging.info(f"训练集大小: {len(train_dataset)}, 验证集大小: {len(val_dataset)}")
+
+    # 初始化模型
+    model = RuleGuidedVAE(
+        grid_size=30,
+        num_categories=10,
+        pixel_codebook_size=512,
+        object_codebook_size=256,
+        rule_codebook_size=128,
+        pixel_dim=64,
+        object_dim=128,
+        relation_dim=64,
+        rule_dim=128
+    )
+    model.to(device)
+
+    # 加载预训练的自编码器权重
+    checkpoint = torch.load(pretrained_path, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    logging.info(f"已加载预训练的自编码器权重: {pretrained_path}")
+
+    # 确定哪些参数需要训练
+    if finetune_ae:
+        # 微调自编码器 + 训练规则相关参数
+        trainable_params = model.parameters()
+        logging.info("训练所有参数（微调自编码器 + 规则组件）")
+    else:
+        # 冻结自编码器参数
+        for param in model.encoder.parameters():
+            param.requires_grad = False
+        for param in model.decoder.parameters():
+            param.requires_grad = False
+        for param in model.object_encoder.parameters():
+            param.requires_grad = False
+
+        # 只训练规则相关参数
+        trainable_params = []
+        trainable_params.extend(model.rule_encoder.parameters())
+        trainable_params.extend(model.rule_applier.parameters())
+        trainable_params.extend(model.rule_quantizer.parameters())
+        trainable_params.extend(model.object_quantizer.parameters())  # 包括对象量化器
+        logging.info("冻结自编码器参数，仅训练规则相关组件")
+
+    # 定义优化器和学习率调度器
+    optimizer = optim.AdamW(trainable_params, lr=learning_rate, weight_decay=1e-5)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+
+    # 检查是否有需要恢复的训练断点
+    start_epoch = 0
+    best_val_loss = float('inf')
+    if resume_path and os.path.exists(resume_path):
+        checkpoint = torch.load(resume_path, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        best_val_loss = checkpoint['best_val_loss']
+        logging.info(f"从断点恢复: {resume_path}")
+        logging.info(f"继续训练从轮次 {start_epoch}, 最佳验证损失: {best_val_loss:.6f}")
+
+    # 定义用于评估的指标函数
+    def compute_metrics(pred, target):
+        """计算评估指标"""
+        # 转换为类别索引
+        pred_idx = torch.argmax(pred, dim=2)
+        target_idx = torch.argmax(target, dim=1).reshape(*pred_idx.shape)
+
+        # 计算像素准确率
+        pixel_acc = (pred_idx == target_idx).float().mean().item()
+
+        # 计算非背景像素准确率
+        non_bg_mask = (target_idx != 0)
+        if torch.any(non_bg_mask):
+            non_bg_acc = ((pred_idx == target_idx) & non_bg_mask).float().sum() / non_bg_mask.float().sum()
+            non_bg_acc = non_bg_acc.item()
+        else:
+            non_bg_acc = 1.0
+
+        # 计算是否完全解决任务
+        task_solved = torch.all(pred_idx == target_idx, dim=1).float().mean().item()
+
+        return {
+            'pixel_acc': pixel_acc,
+            'non_bg_acc': non_bg_acc,
+            'task_solved': task_solved
+        }
+
+    # 验证函数
+    def validate_model(model, val_loader, device):
+        """验证模型性能"""
+        model.eval()
+        val_losses = defaultdict(float)
+        val_metrics = defaultdict(float)
+        total_tasks = 0
+
+        with torch.no_grad():
+            for batch_tasks in val_loader:
+                for task in batch_tasks:
+                    train_examples = task['train']
+                    test_input = task['test']['input'].to(device).unsqueeze(0)
+                    test_output = task['test']['output'].to(device).unsqueeze(0)
+
+                    # 随机选择一个训练样例
+                    train_idx = np.random.randint(0, len(train_examples))
+                    train_input, train_output = train_examples[train_idx]
+                    train_input = train_input.to(device).unsqueeze(0)
+                    train_output = train_output.to(device).unsqueeze(0)
+
+                    # 提取规则并应用
+                    rule = model.extract_rule(train_input, train_output)
+                    pred_output = model.apply_rule(test_input, rule)
+
+                    # 计算损失
+                    recon_loss = F.cross_entropy(
+                        pred_output.reshape(-1, model.num_categories),
+                        torch.argmax(test_output, dim=1).reshape(-1)
+                    )
+
+                    vq_loss = rule.get('vq_loss', 0)
+                    if not isinstance(vq_loss, float):
+                        vq_loss = vq_loss.item()
+
+                    total_loss = recon_weight * recon_loss + vq_weight * vq_loss
+
+                    val_losses['total'] += total_loss.item()
+                    val_losses['recon'] += recon_loss.item()
+                    val_losses['vq'] += vq_loss
+
+                    # 计算指标
+                    metrics = compute_metrics(pred_output, test_output)
+                    for k, v in metrics.items():
+                        val_metrics[k] += v
+
+                    total_tasks += 1
+
+        # 计算平均值
+        avg_losses = {k: v / total_tasks for k, v in val_losses.items()}
+        avg_metrics = {k: v / total_tasks for k, v in val_metrics.items()}
+
+        model.train()
+        return avg_losses, avg_metrics
+
+    # 训练循环
+    for epoch in range(start_epoch, epochs):
+        model.train()
+        train_losses = defaultdict(float)
+        train_metrics = defaultdict(float)
+        total_tasks = 0
+        nan_count = 0
+        epoch_start_time = time.time()
+
+        for batch_tasks in train_dataloader:
+            for task in batch_tasks:
+                # 提取训练样例和测试样例
+                train_examples = task['train']
+                test_input = task['test']['input'].to(device).unsqueeze(0)
+                test_output = task['test']['output'].to(device).unsqueeze(0)
+
+                # 随机选择一个训练样例
+                train_idx = np.random.randint(0, len(train_examples))
+                train_input, train_output = train_examples[train_idx]
+                train_input = train_input.to(device).unsqueeze(0)
+                train_output = train_output.to(device).unsqueeze(0)
+
+                # 前向传播
+                optimizer.zero_grad()
+
+                # 提取规则
+                rule = model.extract_rule(train_input, train_output)
+
+                # 应用规则预测测试输出
+                pred_output = model.apply_rule(test_input, rule)
+
+                # 计算损失
+                recon_loss = F.cross_entropy(
+                    pred_output.reshape(-1, model.num_categories),
+                    torch.argmax(test_output, dim=1).reshape(-1)
+                )
+
+                vq_loss = rule.get('vq_loss', 0)
+                total_loss = recon_weight * recon_loss + vq_weight * vq_loss
+
+                # 检查NaN
+                if torch.isnan(total_loss):
+                    logging.warning(f"警告: 任务 {task.get('id', '未知')} 检测到NaN损失，跳过更新")
+                    nan_count += 1
+                    continue
+
+                # 反向传播
+                total_loss.backward()
+
+                # 检查NaN梯度
+                has_nan_grad = False
+                for name, param in model.named_parameters():
+                    if param.grad is not None and torch.isnan(param.grad).any():
+                        has_nan_grad = True
+                        logging.warning(f"警告: 任务 {task.get('id', '未知')} 检测到NaN梯度，跳过更新")
+                        break
+
+                if has_nan_grad:
+                    nan_count += 1
+                    continue
+
+                # 梯度裁剪和更新
+                torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+                optimizer.step()
+
+                # 记录损失
+                train_losses['total'] += total_loss.item()
+                train_losses['recon'] += recon_loss.item()
+                train_losses['vq'] += vq_loss if isinstance(vq_loss, float) else vq_loss.item()
+
+                # 计算指标
+                with torch.no_grad():
+                    metrics = compute_metrics(pred_output, test_output)
+                    for k, v in metrics.items():
+                        train_metrics[k] += v
+
+                total_tasks += 1
+
+        # 更新学习率
+        scheduler.step()
+
+        # 计算平均指标
+        avg_losses = {k: v / total_tasks for k, v in train_losses.items()} if total_tasks > 0 else {}
+        avg_metrics = {k: v / total_tasks for k, v in train_metrics.items()} if total_tasks > 0 else {}
+
+        # 验证
+        logging.info("执行验证...")
+        val_avg_losses, val_metrics = validate_model(model, val_dataloader, device)
+
+        # 计算轮次耗时
+        epoch_time = time.time() - epoch_start_time
+
+        # 打印进度
+        log_message = (f"轮次: {epoch+1}/{epochs}, 耗时: {epoch_time:.2f}s\n"
+                       f"训练 - 损失: {avg_losses.get('total', 0):.4f}, 准确率: {avg_metrics.get('pixel_acc', 0):.4f}, "
+                       f"任务解决率: {avg_metrics.get('task_solved', 0):.4f}\n"
+                       f"验证 - 损失: {val_avg_losses.get('total', 0):.4f}, 准确率: {val_metrics.get('pixel_acc', 0):.4f}, "
+                       f"任务解决率: {val_metrics.get('task_solved', 0):.4f}")
+
+        if nan_count > 0:
+            log_message += f"\nNaN梯度/损失出现次数: {nan_count}"
+
+        logging.info(log_message)
+
+        # 记录最佳验证损失
+        if val_avg_losses.get('total', float('inf')) < best_val_loss:
+            best_val_loss = val_avg_losses['total']
+            best_model_path = os.path.join(run_dir, "best_model.pt")
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'best_val_loss': best_val_loss,
+                'metrics': val_metrics
+            }, best_model_path)
+            logging.info(f"新的最佳模型已保存! 验证损失: {best_val_loss:.6f}")
+
+        # 定期保存检查点
+        if (epoch + 1) % 10 == 0 or epoch == epochs - 1:
+            checkpoint_path = os.path.join(run_dir, f"rule_guided_vae_epoch_{epoch+1}.pt")
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'best_val_loss': best_val_loss
+            }, checkpoint_path)
+            logging.info(f"检查点已保存到 {checkpoint_path}")
+
+    logging.info(f"训练完成! 最佳验证损失: {best_val_loss:.6f}")
+    return model, run_dir
+
+
+
+
 def check_gpu():
     """检查并详细报告GPU状态"""
     if not torch.cuda.is_available():
