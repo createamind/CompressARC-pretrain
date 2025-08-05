@@ -28,8 +28,10 @@ def two_stage_training(
     print("阶段 1: 编码解码器预训练")
     print("=" * 50)
 
+    passaetrain = False
+
     # 预训练自编码器
-    if resume_ae_path and os.path.exists(resume_ae_path):
+    if resume_ae_path and passaetrain:
         print(f"跳过自编码器预训练，使用现有权重: {resume_ae_path}")
         autoencoder_path = resume_ae_path
     else:
