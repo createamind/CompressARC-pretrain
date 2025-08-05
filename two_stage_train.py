@@ -84,7 +84,7 @@ if __name__ == "__main__":
 
     # 自编码器预训练参数
     parser.add_argument("--ae_epochs", type=int, default=100, help="自编码器预训练轮次")
-    parser.add_argument("--ae_batch_size", type=int, default=16, help="自编码器预训练批量大小")
+    parser.add_argument("--ae_batch_size", type=int, default=256, help="自编码器预训练批量大小")
     parser.add_argument("--ae_lr", type=float, default=1e-3, help="自编码器预训练学习率")
     parser.add_argument("--resume_ae_path", type=str, default="", help="恢复自编码器预训练路径")
 
