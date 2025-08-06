@@ -44,18 +44,18 @@ class VectorQuantizer(nn.Module):
         self.register_buffer('_total_usage', torch.tensor(0, dtype=torch.long))
 
     def _tile_inputs(self, inputs):
-        """处理不同形状的输入"""
+        """处理不同形状的输入 - 保证张量连续性"""
         # 检查输入格式
         input_is_channels_first = False
         if len(inputs.shape) == 4:
             if inputs.shape[1] == self._embedding_dim:  # [B, C, H, W] 格式
                 input_is_channels_first = True
-                inputs = inputs.permute(0, 2, 3, 1).contiguous()  # [B, H, W, C]
+                inputs = inputs.permute(0, 2, 3, 1).contiguous()  # 确保连续性
 
         input_shape = inputs.shape
 
         # 保留原始形状以便重建
-        flat_input = inputs.view(-1, self._embedding_dim)
+        flat_input = inputs.reshape(-1, self._embedding_dim)  # 使用reshape代替view
 
         return flat_input, input_shape
 
@@ -178,17 +178,7 @@ class VectorQuantizer(nn.Module):
 
     def forward(self, inputs):
         """
-        向量量化前向传播
-
-        参数:
-            inputs: 输入张量 [B, D] 或 [B, C, H, W]
-
-        返回:
-            quantized: 量化后的张量 (与输入相同形状)
-            loss: VQ损失
-            perplexity: 编码本熵
-            encodings: 编码索引
-            encoding_indices: 编码向量索引
+        向量量化前向传播 - 修复了非连续张量问题
         """
         # 记录原始输入形状和通道顺序
         original_shape = inputs.shape
@@ -211,9 +201,10 @@ class VectorQuantizer(nn.Module):
         if self.training and self.use_ema:
             self._update_ema(flat_input, encoding_indices)
 
-        # 计算损失 - 确保维度顺序匹配
-        q_latent_loss = F.mse_loss(quantized, inputs.view(input_shape), reduction='mean')
-        e_latent_loss = F.mse_loss(quantized.detach(), inputs.view(input_shape), reduction='mean')
+        # 计算损失 - 使用reshape代替view解决非连续性问题
+        reshaped_inputs = inputs.reshape(input_shape)  # 使用reshape代替view
+        q_latent_loss = F.mse_loss(quantized, reshaped_inputs, reduction='mean')
+        e_latent_loss = F.mse_loss(quantized.detach(), reshaped_inputs, reduction='mean')
         loss = q_latent_loss + self._commitment_cost * e_latent_loss
 
         # 检查损失是否有异常值
@@ -221,8 +212,8 @@ class VectorQuantizer(nn.Module):
             logging.warning(f"VQ损失异常! q_loss={q_latent_loss.item()}, e_loss={e_latent_loss.item()}")
             loss = torch.tensor(0.1, device=inputs.device, requires_grad=True)
 
-        # Straight-through estimator
-        quantized_st = inputs.view(input_shape) + (quantized - inputs.view(input_shape)).detach()
+        # Straight-through estimator - 也使用reshape
+        quantized_st = reshaped_inputs + (quantized - reshaped_inputs).detach()
 
         # 计算使用编码向量的多样性
         avg_probs = torch.histc(encoding_indices.float(),
